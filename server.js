@@ -205,6 +205,19 @@ ${videoBlock}
 app.post('/api/send-proposal', async (req, res) => {
   try {
     const data = req.body;
+        // Normalize field names (accept both snake_case and camelCase)
+        data.contactName = data.contactName || data.contact_name;
+        data.company = data.company || data.company_name;
+        data.email = data.email || data.contact_email;
+        data.contactPhone = data.contactPhone || data.contact_phone;
+        data.letClientChoose = data.letClientChoose || data.let_client_choose;
+        data.extraTrainees = data.extraTrainees || data.extra_trainees;
+        data.extraKits = data.extraKits || data.extra_kits;
+        data.onRoofDay = data.onRoofDay || data.on_roof_day;
+        data.tierPrice = data.tierPrice || data.tier_price;
+        data.totalPrice = data.totalPrice || data.total_price;
+        data.proposalNum = data.proposalNum || data.proposal_num;
+        data.vimeoUrl = data.vimeoUrl || data.vimeo_url;
     if (!data.email || !data.contactName || !data.company) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
