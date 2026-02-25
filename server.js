@@ -268,7 +268,7 @@ app.post('/api/send-proposal', async (req, res) => {
       </div>`
     });
 
-    res.json({ success: true, proposalId: id, proposalUrl, message: `Proposal sent to ${data.email}` });
+    res.json({ success: true, proposalId: id, unique_id: id, proposalUrl, proposal_url: proposalUrl, message: `Proposal sent to ${data.email}` });
   } catch (err) {
     console.error('Error:', err.response ? err.response.body : err);
     res.status(500).json({ error: 'Failed to send proposal', details: err.message });
