@@ -5,8 +5,35 @@ const { Pool } = require('pg');
 const crypto = require('crypto');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+// ── CORS – restrict to allowed frontend origins ─────────────────
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+  : [];
+
+app.use(cors({
+  origin(origin, cb) {
+    // Allow requests with no origin (server-to-server, curl, health checks)
+    if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      return cb(null, true);
+    }
+    cb(new Error('Not allowed by CORS'));
+  }
+}));
+
+app.use(express.json({ limit: '1mb' }));
+
+// ── Admin auth middleware ────────────────────────────────────────
+function requireAdmin(req, res, next) {
+  const key = req.headers.authorization;
+  if (!process.env.ADMIN_API_KEY) {
+    return res.status(500).json({ error: 'Server auth not configured' });
+  }
+  if (!key || key !== `Bearer ${process.env.ADMIN_API_KEY}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+}
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
@@ -201,26 +228,45 @@ ${videoBlock}
 </body></html>`;
 }
 
+// ── Helpers ──────────────────────────────────────────────────────
+function stripHtml(str) {
+  if (typeof str !== 'string') return str;
+  return str.replace(/[<>]/g, '');
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
 // ── POST /api/send-proposal ────────────────────────────────────────
-app.post('/api/send-proposal', async (req, res) => {
+app.post('/api/send-proposal', requireAdmin, async (req, res) => {
   try {
     const data = req.body;
-        // Normalize field names (accept both snake_case and camelCase)
-        data.contactName = data.contactName || data.contact_name;
-        data.company = data.company || data.company_name;
-        data.email = data.email || data.contact_email;
-        data.contactPhone = data.contactPhone || data.contact_phone;
-        data.letClientChoose = data.letClientChoose || data.let_client_choose;
-        data.extraTrainees = data.extraTrainees || data.extra_trainees;
-        data.extraKits = data.extraKits || data.extra_kits;
-        data.onRoofDay = data.onRoofDay || data.on_roof_day;
-        data.tierPrice = data.tierPrice || data.tier_price;
-        data.totalPrice = data.totalPrice || data.total_price;
-        data.proposalNum = data.proposalNum || data.proposal_num;
-        data.vimeoUrl = data.vimeoUrl || data.vimeo_url;
+    // Normalize field names (accept both snake_case and camelCase)
+    // Use ?? so falsy values like 0 and false are preserved correctly
+    data.contactName = data.contactName ?? data.contact_name;
+    data.company = data.company ?? data.company_name;
+    data.email = data.email ?? data.contact_email;
+    data.contactPhone = data.contactPhone ?? data.contact_phone;
+    data.letClientChoose = data.letClientChoose ?? data.let_client_choose;
+    data.extraTrainees = data.extraTrainees ?? data.extra_trainees;
+    data.extraKits = data.extraKits ?? data.extra_kits;
+    data.onRoofDay = data.onRoofDay ?? data.on_roof_day;
+    data.tierPrice = data.tierPrice ?? data.tier_price;
+    data.totalPrice = data.totalPrice ?? data.total_price;
+    data.proposalNum = data.proposalNum ?? data.proposal_num;
+    data.vimeoUrl = data.vimeoUrl ?? data.vimeo_url;
+
     if (!data.email || !data.contactName || !data.company) {
-      return res.status(400).json({ error: 'Missing required fields' });
+      return res.status(400).json({ error: 'Missing required fields: email, contactName, and company are required' });
     }
+    if (!isValidEmail(data.email)) {
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+
+    // Sanitize user-supplied text to prevent HTML injection in emails
+    data.contactName = stripHtml(data.contactName);
+    data.company = stripHtml(data.company);
 
     // Generate unique proposal ID and store in DB
     const id = generateId();
@@ -303,9 +349,23 @@ app.post('/api/proposals/:id/sign', async (req, res) => {
       return res.status(400).json({ error: 'Missing signature data' });
     }
 
+    // Prevent re-signing an already-signed proposal
+    const { rows: existing } = await pool.query('SELECT status FROM proposals WHERE id = $1', [req.params.id]);
+    if (existing.length === 0) {
+      return res.status(404).json({ error: 'Proposal not found' });
+    }
+    if (existing[0].status === 'signed') {
+      return res.status(409).json({ error: 'This proposal has already been signed' });
+    }
+
+    // Limit signature data size (base64 images can be large)
+    if (signatureData.length > 500000) {
+      return res.status(400).json({ error: 'Signature data too large' });
+    }
+
     await pool.query(
       `UPDATE proposals SET status = 'signed', signature_name = $1, signature_data = $2, signed_at = NOW() WHERE id = $3`,
-      [signatureName, signatureData, req.params.id]
+      [stripHtml(signatureName), signatureData, req.params.id]
     );
 
     // Notify Adam that a proposal was signed
@@ -336,8 +396,8 @@ app.post('/api/proposals/:id/sign', async (req, res) => {
 });
 
 // ── GET /api/proposals ─────────────────────────────────────────────
-// List all proposals (for your internal dashboard)
-app.get('/api/proposals', async (req, res) => {
+// List all proposals (for your internal dashboard – admin only)
+app.get('/api/proposals', requireAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(
       'SELECT id, proposal_num, contact_name, company, email, tier, total_price, status, created_at, opened_at, open_count, signed_at FROM proposals ORDER BY created_at DESC'
