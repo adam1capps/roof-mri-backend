@@ -3,8 +3,10 @@ const cors = require('cors');
 const sgMail = require('@sendgrid/mail');
 const { Pool } = require('pg');
 const crypto = require('crypto');
+const Stripe = require('stripe');
 
 const app = express();
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 // ── CORS – restrict to allowed frontend origins ─────────────────
 const allowedOrigins = process.env.ALLOWED_ORIGINS
@@ -20,6 +22,50 @@ app.use(cors({
     cb(new Error('Not allowed by CORS'));
   }
 }));
+
+// Stripe webhook needs the raw body – mount BEFORE express.json()
+app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error('Stripe webhook signature failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const proposalId = session.metadata?.proposal_id;
+    if (proposalId) {
+      await pool.query(
+        `UPDATE proposals SET payment_status = 'paid', stripe_session_id = $1 WHERE id = $2`,
+        [session.id, proposalId]
+      );
+      // Notify Adam of payment
+      const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [proposalId]);
+      if (rows.length > 0) {
+        const p = rows[0];
+        await sgMail.send({
+          to: 'adam@re-dry.com',
+          from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
+          subject: `PAID: ${p.company} - ${p.contact_name}`,
+          html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
+            <div style="background:#1B2A4A;padding:16px 20px;text-align:center">
+              <span style="color:#fff;font-size:16px;font-weight:700">ROOF <span style="color:#00bd70">MRI</span></span>
+            </div>
+            <div style="padding:20px;background:#fff;border:1px solid #e2e8f0">
+              <p style="font-size:14px;color:#374151"><strong>Payment received</strong> from ${p.contact_name} at ${p.company}</p>
+              <p style="font-size:13px;color:#64748b">${p.total_price ? '$' + Number(p.total_price).toLocaleString() : 'N/A'}</p>
+            </div>
+          </div>`
+        });
+      }
+    }
+  }
+
+  res.json({ received: true });
+});
 
 app.use(express.json({ limit: '1mb' }));
 
@@ -67,9 +113,14 @@ async function initDB() {
       signed_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ DEFAULT NOW(),
       opened_at TIMESTAMPTZ,
-      open_count INTEGER DEFAULT 0
+      open_count INTEGER DEFAULT 0,
+      payment_status TEXT DEFAULT 'unpaid',
+      stripe_session_id TEXT
     )
   `);
+  // Add payment columns if upgrading from an older schema
+  await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS payment_status TEXT DEFAULT 'unpaid'`);
+  await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS stripe_session_id TEXT`);
   console.log('Database initialized');
 }
 
@@ -395,12 +446,69 @@ app.post('/api/proposals/:id/sign', async (req, res) => {
   }
 });
 
+// ── POST /api/proposals/:id/checkout ──────────────────────────────
+// Create a Stripe Checkout session so the client can pay after signing
+app.post('/api/proposals/:id/checkout', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Proposal not found' });
+
+    const proposal = rows[0];
+    if (proposal.status !== 'signed') {
+      return res.status(400).json({ error: 'Proposal must be signed before payment' });
+    }
+    if (proposal.payment_status === 'paid') {
+      return res.status(409).json({ error: 'This proposal has already been paid' });
+    }
+    if (!proposal.total_price || Number(proposal.total_price) <= 0) {
+      return res.status(400).json({ error: 'No price set for this proposal' });
+    }
+
+    const baseUrl = process.env.PROPOSAL_BASE_URL || 'https://roof-mri.com';
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: `Roof MRI Training – ${proposal.tier ? proposal.tier.charAt(0).toUpperCase() + proposal.tier.slice(1) : 'Custom'} Package`,
+            description: `Training proposal for ${proposal.company}`,
+          },
+          unit_amount: Math.round(Number(proposal.total_price) * 100), // Stripe uses cents
+        },
+        quantity: 1,
+      }],
+      mode: 'payment',
+      customer_email: proposal.email,
+      metadata: { proposal_id: proposal.id },
+      success_url: `${baseUrl}/p/${proposal.id}?payment=success`,
+      cancel_url: `${baseUrl}/p/${proposal.id}?payment=cancelled`,
+    });
+
+    res.json({ checkoutUrl: session.url });
+  } catch (err) {
+    console.error('Stripe checkout error:', err);
+    res.status(500).json({ error: 'Failed to create checkout session', details: err.message });
+  }
+});
+
+// ── GET /api/proposals/:id/payment-status ────────────────────────
+app.get('/api/proposals/:id/payment-status', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT payment_status FROM proposals WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Proposal not found' });
+    res.json({ payment_status: rows[0].payment_status });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /api/proposals ─────────────────────────────────────────────
 // List all proposals (for your internal dashboard – admin only)
 app.get('/api/proposals', requireAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      'SELECT id, proposal_num, contact_name, company, email, tier, total_price, status, created_at, opened_at, open_count, signed_at FROM proposals ORDER BY created_at DESC'
+      'SELECT id, proposal_num, contact_name, company, email, tier, total_price, status, payment_status, created_at, opened_at, open_count, signed_at FROM proposals ORDER BY created_at DESC'
     );
     res.json(rows);
   } catch (err) {
