@@ -5,6 +5,8 @@ const { Pool } = require('pg');
 const crypto = require('crypto');
 const Stripe = require('stripe');
 const rateLimit = require('express-rate-limit');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -79,16 +81,31 @@ app.use(express.json({ limit: '1mb' }));
 
 // ── Admin auth middleware ────────────────────────────────────────
 function requireAdmin(req, res, next) {
-  const key = req.headers.authorization;
-  if (!process.env.ADMIN_API_KEY) {
-    return res.status(500).json({ error: 'Server auth not configured' });
+  const auth = req.headers.authorization;
+  if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+
+  // Try JWT first (Bearer <jwt-token>)
+  if (auth.startsWith('Bearer ') && process.env.JWT_SECRET) {
+    const token = auth.slice(7);
+    try {
+      const payload = jwt.verify(token, process.env.JWT_SECRET);
+      req.adminUser = { id: payload.sub, email: payload.email };
+      return next();
+    } catch (_jwtErr) {
+      // Not a valid JWT – fall through to API key check
+    }
   }
-  const expected = `Bearer ${process.env.ADMIN_API_KEY}`;
-  if (!key || key.length !== expected.length ||
-      !crypto.timingSafeEqual(Buffer.from(key), Buffer.from(expected))) {
-    return res.status(401).json({ error: 'Unauthorized' });
+
+  // Fallback: legacy API key
+  if (process.env.ADMIN_API_KEY) {
+    const expected = `Bearer ${process.env.ADMIN_API_KEY}`;
+    if (auth.length === expected.length &&
+        crypto.timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) {
+      return next();
+    }
   }
-  next();
+
+  return res.status(401).json({ error: 'Unauthorized' });
 }
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
@@ -154,6 +171,16 @@ async function initDB() {
   // Add payment columns if upgrading from an older schema
   await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS payment_status TEXT DEFAULT 'unpaid'`);
   await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS stripe_session_id TEXT`);
+
+  // Admin users table
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS admin_users (
+      id SERIAL PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
   console.log('Database initialized');
 }
 
@@ -321,6 +348,109 @@ function stripHtml(str) {
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
+
+// ── Admin login rate limiter ─────────────────────────────────────
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,
+  message: { error: 'Too many login attempts, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// ── POST /api/admin/setup ──────────────────────────────────────────
+// One-time endpoint: creates the first admin user. Disabled once an admin exists.
+app.post('/api/admin/setup', loginLimiter, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT COUNT(*)::int AS count FROM admin_users');
+    if (rows[0].count > 0) {
+      return res.status(403).json({ error: 'Admin already configured. Use /api/admin/login.' });
+    }
+
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+    if (password.length < 10) {
+      return res.status(400).json({ error: 'Password must be at least 10 characters' });
+    }
+
+    const hash = await bcrypt.hash(password, 12);
+    const { rows: created } = await pool.query(
+      'INSERT INTO admin_users (email, password_hash) VALUES ($1, $2) RETURNING id, email',
+      [email.toLowerCase().trim(), hash]
+    );
+
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ error: 'JWT_SECRET env var is not set. Add it to your environment and restart.' });
+    }
+
+    const token = jwt.sign(
+      { sub: created[0].id, email: created[0].email },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    res.json({ success: true, token, message: 'Admin account created' });
+  } catch (err) {
+    console.error('Admin setup error:', err);
+    res.status(500).json({ error: 'Failed to create admin account' });
+  }
+});
+
+// ── POST /api/admin/login ──────────────────────────────────────────
+app.post('/api/admin/login', loginLimiter, async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ error: 'JWT_SECRET env var is not set' });
+    }
+
+    const { rows } = await pool.query(
+      'SELECT * FROM admin_users WHERE email = $1',
+      [email.toLowerCase().trim()]
+    );
+
+    if (rows.length === 0) {
+      // Prevent timing attacks: always hash even on miss
+      await bcrypt.hash(password, 12);
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const user = rows[0];
+    const match = await bcrypt.compare(password, user.password_hash);
+    if (!match) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const token = jwt.sign(
+      { sub: user.id, email: user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    );
+
+    res.json({ success: true, token });
+  } catch (err) {
+    console.error('Admin login error:', err);
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+// ── GET /api/admin/me ──────────────────────────────────────────────
+// Verify token validity and return current admin info
+app.get('/api/admin/me', requireAdmin, (req, res) => {
+  if (!req.adminUser) {
+    return res.json({ authenticated: true, method: 'api_key' });
+  }
+  res.json({ authenticated: true, method: 'jwt', email: req.adminUser.email });
+});
 
 // ── POST /api/send-proposal ────────────────────────────────────────
 app.post('/api/send-proposal', requireAdmin, async (req, res) => {
