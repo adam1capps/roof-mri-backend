@@ -4,6 +4,7 @@ const sgMail = require('@sendgrid/mail');
 const { Pool } = require('pg');
 const crypto = require('crypto');
 const Stripe = require('stripe');
+const rateLimit = require('express-rate-limit');
 
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -38,28 +39,35 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     const session = event.data.object;
     const proposalId = session.metadata?.proposal_id;
     if (proposalId) {
-      await pool.query(
-        `UPDATE proposals SET payment_status = 'paid', stripe_session_id = $1 WHERE id = $2`,
-        [session.id, proposalId]
-      );
-      // Notify Adam of payment
-      const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [proposalId]);
-      if (rows.length > 0) {
-        const p = rows[0];
-        await sgMail.send({
-          to: 'adam@re-dry.com',
-          from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
-          subject: `PAID: ${p.company} - ${p.contact_name}`,
-          html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
-            <div style="background:#1B2A4A;padding:16px 20px;text-align:center">
-              <span style="color:#fff;font-size:16px;font-weight:700">ROOF <span style="color:#00bd70">MRI</span></span>
-            </div>
-            <div style="padding:20px;background:#fff;border:1px solid #e2e8f0">
-              <p style="font-size:14px;color:#374151"><strong>Payment received</strong> from ${p.contact_name} at ${p.company}</p>
-              <p style="font-size:13px;color:#64748b">${p.total_price ? '$' + Number(p.total_price).toLocaleString() : 'N/A'}</p>
-            </div>
-          </div>`
-        });
+      try {
+        await pool.query(
+          `UPDATE proposals SET payment_status = 'paid', stripe_session_id = $1 WHERE id = $2`,
+          [session.id, proposalId]
+        );
+        // Notify Adam of payment
+        const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [proposalId]);
+        if (rows.length > 0) {
+          const p = rows[0];
+          const safeName = stripHtml(p.contact_name);
+          const safeCompany = stripHtml(p.company);
+          await sgMail.send({
+            to: 'adam@re-dry.com',
+            from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
+            subject: `PAID: ${safeCompany} - ${safeName}`,
+            html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
+              <div style="background:#1B2A4A;padding:16px 20px;text-align:center">
+                <span style="color:#fff;font-size:16px;font-weight:700">ROOF <span style="color:#00bd70">MRI</span></span>
+              </div>
+              <div style="padding:20px;background:#fff;border:1px solid #e2e8f0">
+                <p style="font-size:14px;color:#374151"><strong>Payment received</strong> from ${safeName} at ${safeCompany}</p>
+                <p style="font-size:13px;color:#64748b">${p.total_price ? '$' + Number(p.total_price).toLocaleString() : 'N/A'}</p>
+              </div>
+            </div>`
+          });
+        }
+      } catch (webhookErr) {
+        console.error('Webhook processing error:', webhookErr);
+        return res.status(500).json({ error: 'Webhook processing failed' });
       }
     }
   }
@@ -82,6 +90,29 @@ function requireAdmin(req, res, next) {
 }
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+
+// ── Rate limiting ──────────────────────────────────────────────
+const signLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+const checkoutLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+const proposalViewLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // ── Database ───────────────────────────────────────────────────────
 const pool = new Pool({
@@ -318,6 +349,10 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
     // Sanitize user-supplied text to prevent HTML injection in emails
     data.contactName = stripHtml(data.contactName);
     data.company = stripHtml(data.company);
+    data.email = stripHtml(data.email);
+    if (Array.isArray(data.tracks)) {
+      data.tracks = data.tracks.map(t => stripHtml(t));
+    }
 
     // Generate unique proposal ID and store in DB
     const id = generateId();
@@ -331,11 +366,11 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
     `, [
       id, data.proposalNum, data.contactName, data.company, data.email,
-      data.tier || null, data.tierPrice || null,
-      data.extraTrainees || 0, data.extraKits || 0,
-      data.tracks || [], data.videography || false, data.onRoofDay || false,
-      data.totalPrice || null, data.letClientChoose || false,
-      data.vimeoUrl || 'https://vimeo.com/1165967889'
+      data.tier ?? null, data.tierPrice ?? null,
+      data.extraTrainees ?? 0, data.extraKits ?? 0,
+      data.tracks ?? [], data.videography ?? false, data.onRoofDay ?? false,
+      data.totalPrice ?? null, data.letClientChoose ?? false,
+      data.vimeoUrl ?? null
     ]);
 
     // Build and send client email
@@ -368,13 +403,13 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
     res.json({ success: true, proposal: { unique_id: id, proposalId: id, proposalUrl, proposal_url: proposalUrl }, message: `Proposal sent to ${data.email}` });
   } catch (err) {
     console.error('Error:', err.response ? err.response.body : err);
-    res.status(500).json({ error: 'Failed to send proposal', details: err.message });
+    res.status(500).json({ error: 'Failed to send proposal' });
   }
 });
 
 // ── GET /api/proposals/:id ─────────────────────────────────────────
 // Returns proposal data (for the Netlify-hosted proposal page to fetch)
-app.get('/api/proposals/:id', async (req, res) => {
+app.get('/api/proposals/:id', proposalViewLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: 'Proposal not found' });
@@ -387,26 +422,18 @@ app.get('/api/proposals/:id', async (req, res) => {
 
     res.json(rows[0]);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error fetching proposal:', err);
+    res.status(500).json({ error: 'Failed to load proposal' });
   }
 });
 
 // ── POST /api/proposals/:id/sign ───────────────────────────────────
 // Client signs the proposal
-app.post('/api/proposals/:id/sign', async (req, res) => {
+app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
   try {
     const { signatureName, signatureData } = req.body;
     if (!signatureName || !signatureData) {
       return res.status(400).json({ error: 'Missing signature data' });
-    }
-
-    // Prevent re-signing an already-signed proposal
-    const { rows: existing } = await pool.query('SELECT status FROM proposals WHERE id = $1', [req.params.id]);
-    if (existing.length === 0) {
-      return res.status(404).json({ error: 'Proposal not found' });
-    }
-    if (existing[0].status === 'signed') {
-      return res.status(409).json({ error: 'This proposal has already been signed' });
     }
 
     // Limit signature data size (base64 images can be large)
@@ -414,41 +441,53 @@ app.post('/api/proposals/:id/sign', async (req, res) => {
       return res.status(400).json({ error: 'Signature data too large' });
     }
 
-    await pool.query(
-      `UPDATE proposals SET status = 'signed', signature_name = $1, signature_data = $2, signed_at = NOW() WHERE id = $3`,
-      [stripHtml(signatureName), signatureData, req.params.id]
+    const safeSignatureName = stripHtml(signatureName);
+
+    // Atomic update: prevents race condition where two concurrent sign requests
+    // both pass a status check before either writes
+    const { rows: updated } = await pool.query(
+      `UPDATE proposals SET status = 'signed', signature_name = $1, signature_data = $2, signed_at = NOW()
+       WHERE id = $3 AND status != 'signed'
+       RETURNING *`,
+      [safeSignatureName, signatureData, req.params.id]
     );
 
-    // Notify Adam that a proposal was signed
-    const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
-    if (rows.length > 0) {
-      const p = rows[0];
-      await sgMail.send({
-        to: 'adam@re-dry.com',
-        from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
-        subject: `SIGNED: ${p.company} - ${p.contact_name}`,
-        html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
-          <div style="background:#00bd70;padding:16px 20px;text-align:center">
-            <span style="color:#fff;font-size:16px;font-weight:700">PROPOSAL SIGNED</span>
-          </div>
-          <div style="padding:20px;background:#fff;border:1px solid #e2e8f0">
-            <p style="font-size:14px;color:#374151"><strong>${p.contact_name}</strong> at <strong>${p.company}</strong> just signed their proposal.</p>
-            <p style="font-size:13px;color:#64748b">${p.tier ? p.tier.charAt(0).toUpperCase() + p.tier.slice(1) : 'Client Choice'} | ${p.total_price ? '$' + Number(p.total_price).toLocaleString() : 'TBD'}</p>
-            <p style="font-size:13px;color:#64748b">Signed by: ${signatureName}</p>
-          </div>
-        </div>`
-      });
+    if (updated.length === 0) {
+      const { rows: check } = await pool.query('SELECT id, status FROM proposals WHERE id = $1', [req.params.id]);
+      if (check.length === 0) return res.status(404).json({ error: 'Proposal not found' });
+      return res.status(409).json({ error: 'This proposal has already been signed' });
     }
+
+    // Notify Adam that a proposal was signed
+    const p = updated[0];
+    const safeName = stripHtml(p.contact_name);
+    const safeCompany = stripHtml(p.company);
+    await sgMail.send({
+      to: 'adam@re-dry.com',
+      from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
+      subject: `SIGNED: ${safeCompany} - ${safeName}`,
+      html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
+        <div style="background:#00bd70;padding:16px 20px;text-align:center">
+          <span style="color:#fff;font-size:16px;font-weight:700">PROPOSAL SIGNED</span>
+        </div>
+        <div style="padding:20px;background:#fff;border:1px solid #e2e8f0">
+          <p style="font-size:14px;color:#374151"><strong>${safeName}</strong> at <strong>${safeCompany}</strong> just signed their proposal.</p>
+          <p style="font-size:13px;color:#64748b">${p.tier ? p.tier.charAt(0).toUpperCase() + p.tier.slice(1) : 'Client Choice'} | ${p.total_price ? '$' + Number(p.total_price).toLocaleString() : 'TBD'}</p>
+          <p style="font-size:13px;color:#64748b">Signed by: ${safeSignatureName}</p>
+        </div>
+      </div>`
+    });
 
     res.json({ success: true, message: 'Proposal signed' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error signing proposal:', err);
+    res.status(500).json({ error: 'Failed to sign proposal' });
   }
 });
 
 // ── POST /api/proposals/:id/checkout ──────────────────────────────
 // Create a Stripe Checkout session so the client can pay after signing
-app.post('/api/proposals/:id/checkout', async (req, res) => {
+app.post('/api/proposals/:id/checkout', checkoutLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: 'Proposal not found' });
@@ -488,18 +527,19 @@ app.post('/api/proposals/:id/checkout', async (req, res) => {
     res.json({ checkoutUrl: session.url });
   } catch (err) {
     console.error('Stripe checkout error:', err);
-    res.status(500).json({ error: 'Failed to create checkout session', details: err.message });
+    res.status(500).json({ error: 'Failed to create checkout session' });
   }
 });
 
 // ── GET /api/proposals/:id/payment-status ────────────────────────
-app.get('/api/proposals/:id/payment-status', async (req, res) => {
+app.get('/api/proposals/:id/payment-status', proposalViewLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT payment_status FROM proposals WHERE id = $1', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: 'Proposal not found' });
     res.json({ payment_status: rows[0].payment_status });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error checking payment status:', err);
+    res.status(500).json({ error: 'Failed to check payment status' });
   }
 });
 
@@ -512,18 +552,45 @@ app.get('/api/proposals', requireAdmin, async (req, res) => {
     );
     res.json(rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error listing proposals:', err);
+    res.status(500).json({ error: 'Failed to list proposals' });
   }
 });
 
 // ── Health ──────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/health', async (req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ status: 'ok' });
+  } catch (err) {
+    console.error('Health check failed:', err);
+    res.status(503).json({ status: 'unhealthy', error: 'Database connection failed' });
+  }
+});
 
 // ── Start ──────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
+let server;
 initDB().then(() => {
-  app.listen(PORT, () => console.log(`Roof MRI backend on port ${PORT}`));
+  server = app.listen(PORT, () => console.log(`Roof MRI backend on port ${PORT}`));
 }).catch(err => {
   console.error('DB init failed:', err);
   process.exit(1);
 });
+
+// ── Graceful shutdown ─────────────────────────────────────────────
+function shutdown(signal) {
+  console.log(`${signal} received, shutting down gracefully...`);
+  if (server) {
+    server.close(() => {
+      pool.end(() => {
+        console.log('Pool closed. Exiting.');
+        process.exit(0);
+      });
+    });
+  } else {
+    process.exit(0);
+  }
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
