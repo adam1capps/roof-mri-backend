@@ -83,7 +83,9 @@ function requireAdmin(req, res, next) {
   if (!process.env.ADMIN_API_KEY) {
     return res.status(500).json({ error: 'Server auth not configured' });
   }
-  if (!key || key !== `Bearer ${process.env.ADMIN_API_KEY}`) {
+  const expected = `Bearer ${process.env.ADMIN_API_KEY}`;
+  if (!key || key.length !== expected.length ||
+      !crypto.timingSafeEqual(Buffer.from(key), Buffer.from(expected))) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   next();
@@ -414,11 +416,13 @@ app.get('/api/proposals/:id', proposalViewLimiter, async (req, res) => {
     const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: 'Proposal not found' });
 
-    // Track opens
-    await pool.query(
-      'UPDATE proposals SET opened_at = COALESCE(opened_at, NOW()), open_count = open_count + 1 WHERE id = $1',
-      [req.params.id]
-    );
+    // Track opens (skip when ?track=false, e.g. payment-polling refetches)
+    if (req.query.track !== 'false') {
+      await pool.query(
+        'UPDATE proposals SET opened_at = COALESCE(opened_at, NOW()), open_count = open_count + 1 WHERE id = $1',
+        [req.params.id]
+      );
+    }
 
     res.json(rows[0]);
   } catch (err) {
@@ -547,10 +551,18 @@ app.get('/api/proposals/:id/payment-status', proposalViewLimiter, async (req, re
 // List all proposals (for your internal dashboard – admin only)
 app.get('/api/proposals', requireAdmin, async (req, res) => {
   try {
-    const { rows } = await pool.query(
-      'SELECT id, proposal_num, contact_name, company, email, tier, total_price, status, payment_status, created_at, opened_at, open_count, signed_at FROM proposals ORDER BY created_at DESC'
-    );
-    res.json(rows);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+
+    const [{ rows }, { rows: countRows }] = await Promise.all([
+      pool.query(
+        'SELECT id, proposal_num, contact_name, company, email, tier, total_price, status, payment_status, created_at, opened_at, open_count, signed_at FROM proposals ORDER BY created_at DESC LIMIT $1 OFFSET $2',
+        [limit, offset]
+      ),
+      pool.query('SELECT COUNT(*)::int AS total FROM proposals'),
+    ]);
+
+    res.json({ proposals: rows, total: countRows[0].total, limit, offset });
   } catch (err) {
     console.error('Error listing proposals:', err);
     res.status(500).json({ error: 'Failed to list proposals' });

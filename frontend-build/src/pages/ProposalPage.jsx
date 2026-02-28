@@ -67,9 +67,9 @@ export default function ProposalPage() {
         } catch { /* retry */ }
         await new Promise(r => setTimeout(r, 2000))
       }
-      // After polling, just refresh the whole proposal
+      // After polling, just refresh the whole proposal (skip open tracking)
       try {
-        const res = await fetch(`${API}/api/proposals/${id}`)
+        const res = await fetch(`${API}/api/proposals/${id}?track=false`)
         if (res.ok) {
           const data = await res.json()
           setProposal(data)
