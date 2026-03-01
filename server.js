@@ -492,7 +492,7 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
 
     // Generate unique proposal ID and store in DB
     const id = generateId();
-    const baseUrl = process.env.PROPOSAL_BASE_URL || 'https://roof-mri.com';
+    const baseUrl = process.env.PROPOSAL_BASE_URL || 'https://proposals.roof-mri.com';
     const proposalUrl = `${baseUrl}/p/${id}`;
 
     await pool.query(`
@@ -641,7 +641,7 @@ app.post('/api/proposals/:id/checkout', checkoutLimiter, async (req, res) => {
       return res.status(400).json({ error: 'No price set for this proposal' });
     }
 
-    const baseUrl = process.env.PROPOSAL_BASE_URL || 'https://roof-mri.com';
+    const baseUrl = process.env.PROPOSAL_BASE_URL || 'https://proposals.roof-mri.com';
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       line_items: [{
