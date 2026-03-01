@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import SignaturePad from '../components/SignaturePad'
+import RoiCalculator from '../components/RoiCalculator'
 
 const API = import.meta.env.VITE_API_URL || ''
 
@@ -238,6 +239,11 @@ export default function ProposalPage() {
           </div>
         </div>
       )}
+
+      {/* ROI Calculator */}
+      <div className="card">
+        <RoiCalculator investmentAmount={proposal.total_price} />
+      </div>
 
       {/* Video */}
       {vimeoId && (

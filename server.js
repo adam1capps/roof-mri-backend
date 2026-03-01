@@ -8,6 +8,7 @@ const rateLimit = require('express-rate-limit');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
+const PDFDocument = require('pdfkit');
 const path = require('path');
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
@@ -200,12 +201,13 @@ function buildEmail(data, proposalUrl) {
 
   const firstName = contactName.split(' ')[0];
 
+  // Build training summary rows
   let summaryRows = '';
   if (letClientChoose) {
     summaryRows = `
       <tr style="background:#f8fafc;">
         <td style="padding:10px 14px;font-size:13px;color:#64748b;font-weight:600;border-bottom:1px solid #e2e8f0;width:40%;">Package</td>
-        <td style="padding:10px 14px;font-size:14px;color:#1B2A4A;font-weight:700;border-bottom:1px solid #e2e8f0;">Your choice of training tier</td>
+        <td style="padding:10px 14px;font-size:14px;color:#1B2A4A;font-weight:700;border-bottom:1px solid #e2e8f0;">See attached options</td>
       </tr>
       <tr>
         <td style="padding:10px 14px;font-size:13px;color:#64748b;font-weight:600;">Company</td>
@@ -258,6 +260,7 @@ function buildEmail(data, proposalUrl) {
     }
   }
 
+  // Investment section
   let investmentSection = '';
   if (!letClientChoose && totalPrice) {
     const formatted = Number(totalPrice).toLocaleString('en-US', { style: 'currency', currency: 'USD' });
@@ -276,6 +279,7 @@ function buildEmail(data, proposalUrl) {
     </td></tr>`;
   }
 
+  // Video block
   let videoBlock = '';
   if (vimeoUrl) {
     const vimeoMatch = vimeoUrl.match(/vimeo\.com\/(\d+)/);
@@ -301,16 +305,89 @@ function buildEmail(data, proposalUrl) {
 <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f1f5f9;">
 <tr><td align="center" style="padding:24px 12px;">
 <table width="600" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);">
-<tr><td style="background:#1B2A4A;padding:20px 28px;text-align:center;">
-  <span style="color:#ffffff;font-size:22px;font-weight:700;letter-spacing:1px;">ROOF </span><span style="color:#00bd70;font-size:22px;font-weight:700;letter-spacing:1px;">MRI</span>
+
+<!-- Header -->
+<tr><td style="background:#1B2A4A;padding:24px 28px;text-align:center;">
+  <span style="color:#ffffff;font-size:24px;font-weight:700;letter-spacing:1px;">ROOF </span><span style="color:#00bd70;font-size:24px;font-weight:700;letter-spacing:1px;">MRI</span>
   <br><span style="color:#94a3b8;font-size:11px;letter-spacing:2px;text-transform:uppercase;">Training &amp; Certification</span>
 </td></tr>
+
+<!-- Greeting -->
 <tr><td style="padding:28px 28px 8px 28px;">
-  <p style="margin:0;font-size:16px;color:#1B2A4A;line-height:1.5;">Hi ${firstName},</p>
+  <p style="margin:0;font-size:17px;color:#1B2A4A;line-height:1.5;">Hi ${firstName},</p>
 </td></tr>
+
+<!-- Opening copy -->
 <tr><td style="padding:8px 28px 20px 28px;">
-  <p style="margin:0;font-size:15px;color:#475569;line-height:1.6;">Thanks for taking the time to talk with us about Roof MRI training for <strong style="color:#1B2A4A;">${company}</strong>. We've put together a custom training proposal based on our conversation. Everything you need is in the link below.</p>
+  <p style="margin:0 0 14px 0;font-size:15px;color:#475569;line-height:1.7;">Great speaking with you about bringing Roof MRI to <strong style="color:#1B2A4A;">${company}</strong>. I put together a custom training proposal for your team, and I'm genuinely excited about the impact this will have on your business.</p>
+  <p style="margin:0;font-size:15px;color:#475569;line-height:1.7;">Roof MRI certification doesn't just add a service to your lineup &mdash; it transforms how ${company} approaches every commercial roof. Your team will walk away with the skills, equipment, and confidence to offer clients something most contractors simply can't.</p>
 </td></tr>
+
+<!-- Why This Matters section -->
+<tr><td style="padding:0 28px;"><div style="border-top:1px solid #e2e8f0;"></div></td></tr>
+<tr><td style="padding:20px 28px 12px 28px;">
+  <p style="margin:0;font-size:13px;font-weight:700;color:#1B2A4A;text-transform:uppercase;letter-spacing:1px;">Why This Matters for ${company}</p>
+</td></tr>
+<tr><td style="padding:0 28px 20px 28px;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0">
+    <tr>
+      <td style="padding:10px 0;vertical-align:top;width:28px;">
+        <span style="display:inline-block;width:22px;height:22px;background:#00bd70;border-radius:50%;text-align:center;line-height:22px;color:#fff;font-size:13px;font-weight:700;">&#10003;</span>
+      </td>
+      <td style="padding:10px 0 10px 10px;">
+        <p style="margin:0;font-size:14px;color:#1B2A4A;font-weight:600;">New Revenue Stream</p>
+        <p style="margin:4px 0 0;font-size:13px;color:#64748b;line-height:1.5;">Offer moisture scanning as a standalone service or bundle it into existing bids. This pays for itself.</p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:10px 0;vertical-align:top;width:28px;">
+        <span style="display:inline-block;width:22px;height:22px;background:#00bd70;border-radius:50%;text-align:center;line-height:22px;color:#fff;font-size:13px;font-weight:700;">&#10003;</span>
+      </td>
+      <td style="padding:10px 0 10px 10px;">
+        <p style="margin:0;font-size:14px;color:#1B2A4A;font-weight:600;">Win More Jobs</p>
+        <p style="margin:4px 0 0;font-size:13px;color:#64748b;line-height:1.5;">Walk into every bid with objective, data-driven moisture intelligence that your competitors don't have.</p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:10px 0;vertical-align:top;width:28px;">
+        <span style="display:inline-block;width:22px;height:22px;background:#00bd70;border-radius:50%;text-align:center;line-height:22px;color:#fff;font-size:13px;font-weight:700;">&#10003;</span>
+      </td>
+      <td style="padding:10px 0 10px 10px;">
+        <p style="margin:0;font-size:14px;color:#1B2A4A;font-weight:600;">Protect Your Reputation</p>
+        <p style="margin:4px 0 0;font-size:13px;color:#64748b;line-height:1.5;">Calibrated PHD Scale readings mean precise, repeatable results &mdash; no guesswork, no liability surprises.</p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:10px 0;vertical-align:top;width:28px;">
+        <span style="display:inline-block;width:22px;height:22px;background:#00bd70;border-radius:50%;text-align:center;line-height:22px;color:#fff;font-size:13px;font-weight:700;">&#10003;</span>
+      </td>
+      <td style="padding:10px 0 10px 10px;">
+        <p style="margin:0;font-size:14px;color:#1B2A4A;font-weight:600;">Skills That Compound</p>
+        <p style="margin:4px 0 0;font-size:13px;color:#64748b;line-height:1.5;">This isn't a one-time training. Your team gets certified, equipped, and supported with ongoing technical guidance for years to come.</p>
+      </td>
+    </tr>
+  </table>
+</td></tr>
+
+<!-- ROI Teaser -->
+<tr><td style="padding:0 28px;"><div style="border-top:1px solid #e2e8f0;"></div></td></tr>
+<tr><td style="padding:20px 28px 12px 28px;">
+  <p style="margin:0;font-size:13px;font-weight:700;color:#1B2A4A;text-transform:uppercase;letter-spacing:1px;">See How Fast This Pays for Itself</p>
+</td></tr>
+<tr><td style="padding:0 28px 8px 28px;">
+  <p style="margin:0;font-size:14px;color:#475569;line-height:1.6;">Your proposal page includes an <strong style="color:#1B2A4A;">ROI calculator</strong> where you can plug in your own numbers &mdash; scans per month, price per scan &mdash; and see exactly how quickly your training investment turns into profit.</p>
+</td></tr>
+<tr><td style="padding:4px 28px 20px 28px;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;">
+    <tr>
+      <td style="padding:16px 20px;text-align:center;">
+        <p style="margin:0;font-size:13px;color:#15803d;font-weight:600;">Most contractors see a full return on their training investment within the first few months of scanning.</p>
+      </td>
+    </tr>
+  </table>
+</td></tr>
+
+<!-- Training Overview -->
 <tr><td style="padding:0 28px;"><div style="border-top:1px solid #e2e8f0;"></div></td></tr>
 <tr><td style="padding:20px 28px 12px 28px;">
   <p style="margin:0;font-size:13px;font-weight:700;color:#1B2A4A;text-transform:uppercase;letter-spacing:1px;">Training Overview</p>
@@ -320,27 +397,188 @@ function buildEmail(data, proposalUrl) {
     ${summaryRows}
   </table>
 </td></tr>
+
 ${investmentSection}
 ${videoBlock}
-<tr><td style="padding:24px 28px 28px 28px;text-align:center;">
+
+<!-- CTA Button -->
+<tr><td style="padding:24px 28px 12px 28px;text-align:center;">
   <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
-    <tr><td style="background:#00bd70;border-radius:8px;padding:16px 48px;text-align:center;">
-      <a href="${proposalUrl}" style="color:#ffffff;font-size:16px;font-weight:700;text-decoration:none;display:block;">Get Started Here</a>
+    <tr><td style="background:#00bd70;border-radius:8px;padding:18px 56px;text-align:center;">
+      <a href="${proposalUrl}" style="color:#ffffff;font-size:17px;font-weight:700;text-decoration:none;display:block;">View Your Proposal</a>
     </td></tr>
   </table>
 </td></tr>
-<tr><td style="padding:0 28px 24px 28px;">
-  <p style="margin:0 0 8px 0;font-size:14px;color:#475569;line-height:1.6;">If you have any questions, just hit reply. We're here to help.</p>
-  <p style="margin:0;font-size:14px;color:#1B2A4A;font-weight:600;">Adam Capps</p>
-  <p style="margin:0;font-size:13px;color:#64748b;">Roof MRI</p>
+<tr><td style="padding:4px 28px 24px 28px;text-align:center;">
+  <p style="margin:0;font-size:12px;color:#94a3b8;">Review your options, calculate your ROI, and get started when you're ready.</p>
 </td></tr>
+
+<!-- PDF note for let-client-choose -->
+${letClientChoose ? `
+<tr><td style="padding:0 28px 20px 28px;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;">
+    <tr><td style="padding:14px 18px;">
+      <p style="margin:0;font-size:13px;color:#475569;line-height:1.5;"><strong style="color:#1B2A4A;">&#128206; Check the attached PDF</strong> for a side-by-side comparison of all training options to find the best fit for ${company}.</p>
+    </td></tr>
+  </table>
+</td></tr>` : ''}
+
+<!-- Closing -->
+<tr><td style="padding:0 28px 24px 28px;">
+  <p style="margin:0 0 12px 0;font-size:14px;color:#475569;line-height:1.6;">I'm looking forward to getting ${company} certified and scanning. Hit reply anytime &mdash; happy to answer questions or hop on a quick call.</p>
+  <p style="margin:0;font-size:14px;color:#1B2A4A;font-weight:600;">Adam Capps</p>
+  <p style="margin:0;font-size:13px;color:#64748b;">Founder, Roof MRI &amp; ReDry</p>
+  <p style="margin:0;font-size:13px;color:#64748b;">adam@re-dry.com</p>
+</td></tr>
+
+<!-- Footer -->
 <tr><td style="background:#1B2A4A;padding:16px 28px;text-align:center;">
   <p style="margin:0 0 4px 0;font-size:12px;color:#94a3b8;">Roof MRI | Advancing the Science of Roof Moisture Detection</p>
   <p style="margin:0;font-size:11px;color:#64748b;">roof-mri.com</p>
 </td></tr>
+
 </table>
 </td></tr></table>
 </body></html>`;
+}
+
+// ── Generate proposal PDF (tier comparison) ─────────────────────
+function buildProposalPdf(data, proposalUrl) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    const navy = '#1B2A4A';
+    const green = '#00bd70';
+    const gray = '#64748b';
+    const lightGray = '#f1f5f9';
+    const borderGray = '#e2e8f0';
+    const pageW = doc.page.width - 100; // 512pt usable
+
+    // ── Header bar ──
+    doc.rect(0, 0, doc.page.width, 70).fill(navy);
+    doc.fontSize(22).fill('#ffffff').text('ROOF ', 50, 24, { continued: true })
+       .fill(green).text('MRI', { continued: false });
+    doc.fontSize(9).fill('#94a3b8').text('TRAINING & CERTIFICATION', 50, 50);
+
+    doc.moveDown(2);
+    const startY = doc.y;
+
+    // ── Title ──
+    doc.fontSize(18).fill(navy).text(`Training Proposal for ${data.company}`, 50, startY);
+    doc.moveDown(0.3);
+    doc.fontSize(10).fill(gray).text(`Prepared for ${data.contactName}`, 50);
+    doc.moveDown(1.5);
+
+    // ── Tier comparison table ──
+    const tiers = [
+      { key: 'professional', name: 'Professional', trainees: 3, kits: 1,
+        desc: 'Ideal for small teams getting started with moisture scanning.' },
+      { key: 'regional', name: 'Regional', trainees: 10, kits: 2,
+        desc: 'Built for companies covering a multi-city or statewide territory.' },
+      { key: 'enterprise', name: 'Enterprise', trainees: 25, kits: 4,
+        desc: 'Full-scale deployment for large organizations with multiple crews.' },
+    ];
+
+    doc.fontSize(12).fill(navy).text('TRAINING OPTIONS', 50, doc.y, { underline: false });
+    doc.moveDown(0.3);
+    doc.fontSize(9).fill(gray).text('Compare packages below to find the right fit for your team.', 50);
+    doc.moveDown(1);
+
+    const colW = Math.floor(pageW / 3);
+    const tableX = 50;
+    let tableY = doc.y;
+
+    // Header row
+    tiers.forEach((t, i) => {
+      const x = tableX + i * colW;
+      const isSelected = data.tier === t.key;
+      doc.rect(x, tableY, colW, 32).fill(isSelected ? green : navy);
+      doc.fontSize(11).fill('#ffffff').text(t.name, x + 8, tableY + 10, { width: colW - 16, align: 'center' });
+    });
+    tableY += 32;
+
+    // Data rows
+    const rows = [
+      { label: 'Certified Trainees', values: tiers.map(t => String(t.trainees)) },
+      { label: 'Recon Kits', values: tiers.map(t => String(t.kits)) },
+      { label: 'PHD Scale Calibration', values: ['Included', 'Included', 'Included'] },
+      { label: 'Tramex Equipment', values: ['Included', 'Included', 'Included'] },
+      { label: 'Ongoing Support', values: ['Included', 'Included', 'Included'] },
+      { label: 'Moisture Grid Reports', values: ['Included', 'Included', 'Included'] },
+    ];
+
+    rows.forEach((row, ri) => {
+      const bg = ri % 2 === 0 ? lightGray : '#ffffff';
+      const rowH = 24;
+
+      // Label column background
+      doc.rect(tableX, tableY, colW, rowH).fill(bg);
+      doc.rect(tableX + colW, tableY, colW, rowH).fill(bg);
+      doc.rect(tableX + 2 * colW, tableY, colW, rowH).fill(bg);
+
+      // Borders
+      doc.rect(tableX, tableY, pageW, rowH).lineWidth(0.5).stroke(borderGray);
+
+      // Label in first part of each cell
+      tiers.forEach((t, i) => {
+        const x = tableX + i * colW;
+        if (i === 0) {
+          doc.fontSize(8).fill(gray).text(row.label, x + 8, tableY + 7, { width: colW - 16 });
+        }
+        doc.fontSize(9).fill(navy).text(row.values[i], x + 8, tableY + 7, { width: colW - 16, align: 'center' });
+      });
+      tableY += rowH;
+    });
+
+    // Descriptions
+    tableY += 8;
+    tiers.forEach((t, i) => {
+      const x = tableX + i * colW;
+      doc.fontSize(8).fill(gray).text(t.desc, x + 8, tableY, { width: colW - 16, lineGap: 2 });
+    });
+
+    // ── Benefits section ──
+    doc.moveDown(5);
+    const benefitsY = doc.y;
+    doc.fontSize(12).fill(navy).text('WHAT YOUR TEAM GETS', 50, benefitsY);
+    doc.moveDown(0.6);
+
+    const benefits = [
+      ['New Revenue Stream', 'Offer moisture scanning as a paid service on every project or as a standalone offering.'],
+      ['Competitive Advantage', 'Deliver objective, PHD-calibrated moisture data that other contractors can\'t match.'],
+      ['Reduced Liability', 'Precise, repeatable readings backed by calibrated science \u2014 not guesswork.'],
+      ['Long-Term Value', 'Equipment, certification, and ongoing support your team will use for years.'],
+    ];
+
+    benefits.forEach(([title, desc]) => {
+      const y = doc.y;
+      doc.circle(58, y + 5, 4).fill(green);
+      doc.fontSize(10).fill(navy).text(title, 70, y, { continued: false });
+      doc.fontSize(9).fill(gray).text(desc, 70, doc.y, { width: pageW - 30 });
+      doc.moveDown(0.5);
+    });
+
+    // ── CTA ──
+    doc.moveDown(1);
+    const ctaY = doc.y;
+    doc.roundedRect(50, ctaY, pageW, 56, 8).fill(navy);
+    doc.fontSize(13).fill('#ffffff').text('Ready to get started?', 50, ctaY + 12, { width: pageW, align: 'center' });
+    doc.fontSize(10).fill(green).text(proposalUrl, 50, ctaY + 32, {
+      width: pageW, align: 'center', link: proposalUrl, underline: true,
+    });
+
+    // ── Footer ──
+    doc.fontSize(8).fill(gray).text(
+      'Roof MRI | Advancing the Science of Roof Moisture Detection | roof-mri.com',
+      50, doc.page.height - 40, { width: pageW, align: 'center' }
+    );
+
+    doc.end();
+  });
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -509,15 +747,24 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
       data.vimeoUrl ?? null
     ]);
 
-    // Build and send client email
+    // Build email and PDF
     const html = buildEmail(data, proposalUrl);
-    await sgMail.send({
+    const pdfBuffer = await buildProposalPdf(data, proposalUrl);
+
+    const emailMsg = {
       to: data.email,
       from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
       replyTo: { email: 'adam@re-dry.com', name: 'Adam Capps' },
       subject: `Roof MRI Training Proposal for ${data.company}`,
-      html
-    });
+      html,
+      attachments: [{
+        content: pdfBuffer.toString('base64'),
+        filename: `Roof-MRI-Proposal-${data.company.replace(/[^a-zA-Z0-9]/g, '-')}.pdf`,
+        type: 'application/pdf',
+        disposition: 'attachment',
+      }],
+    };
+    await sgMail.send(emailMsg);
 
     // Internal notification
     await sgMail.send({
