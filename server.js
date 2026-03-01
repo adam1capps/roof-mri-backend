@@ -616,6 +616,9 @@ app.post('/api/admin/setup', loginLimiter, async (req, res) => {
     if (!isValidEmail(email)) {
       return res.status(400).json({ error: 'Invalid email address' });
     }
+    if (!email.toLowerCase().trim().endsWith('@re-dry.com')) {
+      return res.status(403).json({ error: 'Only @re-dry.com email addresses are allowed' });
+    }
     if (password.length < 10) {
       return res.status(400).json({ error: 'Password must be at least 10 characters' });
     }
@@ -649,6 +652,9 @@ app.post('/api/admin/login', loginLimiter, async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
+    }
+    if (!email.toLowerCase().trim().endsWith('@re-dry.com')) {
+      return res.status(403).json({ error: 'Only @re-dry.com email addresses are allowed' });
     }
 
     if (!process.env.JWT_SECRET) {
