@@ -65,6 +65,39 @@ Test it by visiting `https://your-render-url.onrender.com/health` in your browse
 
 ---
 
+## How to Deploy the Frontend to Netlify
+
+The frontend lives in the `frontend-build/` folder inside this same repo. No separate repo needed.
+
+### Step 1: Connect this repo to Netlify
+
+1. Log into [netlify.com](https://netlify.com)
+2. Click **Add new site** → **Import an existing project**
+3. Connect your GitHub and select the `roof-mri-backend` repo
+4. Set these build settings:
+
+| Setting | Value |
+|---------|-------|
+| **Base directory** | `frontend-build` |
+| **Build command** | `npm run build` |
+| **Publish directory** | `frontend-build/dist` |
+
+### Step 2: Add your environment variable
+
+Go to **Site configuration** → **Environment variables** and add:
+
+| Key | What to put |
+|-----|-------------|
+| `VITE_API_URL` | Your Render backend URL (e.g. `https://roof-mri-backend.onrender.com`) |
+
+### Step 3: Set up your custom domain
+
+Go to **Domain management** and add `proposals.roof-mri.com` (or whatever domain you're using).
+
+That's it. Every time you push to this repo, Netlify will automatically rebuild the frontend.
+
+---
+
 ## API Endpoints
 
 | Endpoint | What it does |
@@ -72,5 +105,9 @@ Test it by visiting `https://your-render-url.onrender.com/health` in your browse
 | `POST /api/send-proposal` | Saves a proposal and emails it to the client |
 | `GET /api/proposals/:id` | Gets a single proposal (used by the client's proposal page) |
 | `POST /api/proposals/:id/sign` | Records a client's signature |
+| `POST /api/proposals/:id/checkout` | Creates a Stripe checkout session |
+| `GET /api/proposals/:id/payment-status` | Checks if payment went through |
 | `GET /api/proposals` | Lists all proposals (for your internal dashboard) |
+| `POST /api/admin/setup` | Create the first admin account (one-time) |
+| `POST /api/admin/login` | Admin login (returns JWT token) |
 | `GET /health` | Quick check that the server is running |
