@@ -177,6 +177,12 @@ async function initDB() {
   await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS payment_status TEXT DEFAULT 'unpaid'`);
   await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS stripe_session_id TEXT`);
 
+  // Add per-tier pricing columns for "let client choose" proposals
+  await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS professional_price NUMERIC`);
+  await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS regional_price NUMERIC`);
+  await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS enterprise_price NUMERIC`);
+  await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS selected_tier TEXT`);
+
   // Admin users table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS admin_users (
@@ -718,6 +724,9 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
     data.totalPrice = data.totalPrice ?? data.total_price;
     data.proposalNum = data.proposalNum ?? data.proposal_num;
     data.vimeoUrl = data.vimeoUrl ?? data.vimeo_url;
+    data.professionalPrice = data.professionalPrice ?? data.professional_price;
+    data.regionalPrice = data.regionalPrice ?? data.regional_price;
+    data.enterprisePrice = data.enterprisePrice ?? data.enterprise_price;
 
     if (!data.email || !data.contactName || !data.company) {
       return res.status(400).json({ error: 'Missing required fields: email, contactName, and company are required' });
@@ -742,15 +751,16 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
     await pool.query(`
       INSERT INTO proposals (id, proposal_num, contact_name, company, email, tier, tier_price,
         extra_trainees, extra_kits, tracks, videography, on_roof_day, total_price,
-        let_client_choose, vimeo_url)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+        let_client_choose, vimeo_url, professional_price, regional_price, enterprise_price)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
     `, [
       id, data.proposalNum, data.contactName, data.company, data.email,
       data.tier ?? null, data.tierPrice ?? null,
       data.extraTrainees ?? 0, data.extraKits ?? 0,
       data.tracks ?? [], data.videography ?? false, data.onRoofDay ?? false,
       data.totalPrice ?? null, data.letClientChoose ?? false,
-      data.vimeoUrl ?? null
+      data.vimeoUrl ?? null,
+      data.professionalPrice ?? null, data.regionalPrice ?? null, data.enterprisePrice ?? null
     ]);
 
     // Build email and PDF
@@ -873,6 +883,47 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
   } catch (err) {
     console.error('Error signing proposal:', err);
     res.status(500).json({ error: 'Failed to sign proposal' });
+  }
+});
+
+// ── POST /api/proposals/:id/select-tier ──────────────────────────
+// Client selects a tier on a "let client choose" proposal
+app.post('/api/proposals/:id/select-tier', proposalViewLimiter, async (req, res) => {
+  try {
+    const { tier } = req.body;
+    const validTiers = ['professional', 'regional', 'enterprise'];
+    if (!tier || !validTiers.includes(tier)) {
+      return res.status(400).json({ error: 'Invalid tier selection' });
+    }
+
+    const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Proposal not found' });
+
+    const proposal = rows[0];
+    if (!proposal.let_client_choose) {
+      return res.status(400).json({ error: 'This proposal does not allow tier selection' });
+    }
+    if (proposal.status === 'signed') {
+      return res.status(409).json({ error: 'This proposal has already been signed' });
+    }
+
+    // Look up the price for the selected tier
+    const priceColumn = `${tier}_price`;
+    const tierPrice = proposal[priceColumn];
+    if (!tierPrice || Number(tierPrice) <= 0) {
+      return res.status(400).json({ error: 'No price available for this tier' });
+    }
+
+    const { rows: updated } = await pool.query(
+      `UPDATE proposals SET selected_tier = $1, tier = $1, total_price = $2
+       WHERE id = $3 RETURNING *`,
+      [tier, tierPrice, req.params.id]
+    );
+
+    res.json(updated[0]);
+  } catch (err) {
+    console.error('Error selecting tier:', err);
+    res.status(500).json({ error: 'Failed to select tier' });
   }
 });
 

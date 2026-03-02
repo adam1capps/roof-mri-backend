@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import SignaturePad from '../components/SignaturePad'
 import RoiCalculator from '../components/RoiCalculator'
+import PackageSelector from '../components/PackageSelector'
 
 const API = import.meta.env.VITE_API_URL || ''
 
@@ -26,6 +27,7 @@ export default function ProposalPage() {
   const [signError, setSignError] = useState(null)
   const [justSigned, setJustSigned] = useState(false)
   const [checkingPayment, setCheckingPayment] = useState(false)
+  const [selectingTier, setSelectingTier] = useState(false)
 
   const paymentParam = searchParams.get('payment')
 
@@ -117,6 +119,28 @@ export default function ProposalPage() {
     }
   }
 
+  async function handleSelectTier(tier) {
+    setSelectingTier(true)
+    try {
+      const res = await fetch(`${API}/api/proposals/${id}/select-tier`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tier }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setSignError(data.error || 'Failed to select package')
+        return
+      }
+      const updated = await res.json()
+      setProposal(updated)
+    } catch {
+      setSignError('Failed to connect. Please try again.')
+    } finally {
+      setSelectingTier(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="page-wrapper">
@@ -159,12 +183,35 @@ export default function ProposalPage() {
   const isPaid = proposal.payment_status === 'paid'
   const hasPrice = proposal.total_price && Number(proposal.total_price) > 0
   const firstName = proposal.contact_name?.split(' ')[0] || ''
+  const needsTierSelection = proposal.let_client_choose && !proposal.selected_tier && !proposal.tier
+
+  // Tier prices for the package selector
+  const tierPrices = {
+    professional: proposal.professional_price,
+    regional: proposal.regional_price,
+    enterprise: proposal.enterprise_price,
+  }
 
   // Build summary rows
   const summaryRows = []
-  if (proposal.let_client_choose) {
-    summaryRows.push(['Package', 'Your choice of training tier'])
+  if (proposal.let_client_choose && needsTierSelection) {
+    // Don't build summary rows — we'll show the package selector instead
+  } else if (proposal.let_client_choose) {
+    // Tier was selected by the client
+    if (proposal.tier || proposal.selected_tier) {
+      const tier = proposal.selected_tier || proposal.tier
+      summaryRows.push(['Package', TIER_NAMES[tier] || tier])
+    }
     summaryRows.push(['Company', proposal.company])
+    if (proposal.tier || proposal.selected_tier) {
+      const tier = proposal.selected_tier || proposal.tier
+      const baseTrainees = TIER_TRAINEES[tier] || 0
+      summaryRows.push(['Trainees', baseTrainees])
+      const baseKits = TIER_KITS[tier] || 0
+      summaryRows.push(['Recon Kits', baseKits])
+    }
+    if (proposal.videography) summaryRows.push(['Videography', 'Included'])
+    if (proposal.on_roof_day) summaryRows.push(['On-Roof Training Day', 'Included'])
   } else {
     if (proposal.tier) {
       summaryRows.push(['Package', TIER_NAMES[proposal.tier] || proposal.tier])
@@ -214,23 +261,39 @@ export default function ProposalPage() {
         </p>
       </div>
 
-      {/* Training Overview */}
-      <div className="card">
-        <p className="section-title">Training Overview</p>
-        <table className="summary-table">
-          <tbody>
-            {summaryRows.map(([label, value], i) => (
-              <tr key={i}>
-                <td>{label}</td>
-                <td>{value}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {/* Package Selector (when client gets to choose) */}
+      {needsTierSelection && (
+        <div className="card pkg-card-wrapper">
+          {signError && (
+            <p style={{ color: '#dc2626', fontSize: 13, marginBottom: 12 }}>{signError}</p>
+          )}
+          <PackageSelector
+            prices={tierPrices}
+            onSelect={handleSelectTier}
+            selecting={selectingTier}
+          />
+        </div>
+      )}
+
+      {/* Training Overview (shown after tier is selected or when admin picked the tier) */}
+      {!needsTierSelection && summaryRows.length > 0 && (
+        <div className="card">
+          <p className="section-title">Training Overview</p>
+          <table className="summary-table">
+            <tbody>
+              {summaryRows.map(([label, value], i) => (
+                <tr key={i}>
+                  <td>{label}</td>
+                  <td>{value}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* Investment */}
-      {hasPrice && !proposal.let_client_choose && (
+      {hasPrice && !needsTierSelection && (
         <div className="card">
           <p className="section-title">Your Investment</p>
           <div className="investment-row">
@@ -241,9 +304,11 @@ export default function ProposalPage() {
       )}
 
       {/* ROI Calculator */}
-      <div className="card">
-        <RoiCalculator investmentAmount={proposal.total_price} />
-      </div>
+      {!needsTierSelection && (
+        <div className="card">
+          <RoiCalculator investmentAmount={proposal.total_price} />
+        </div>
+      )}
 
       {/* Video */}
       {vimeoId && (
@@ -313,8 +378,8 @@ export default function ProposalPage() {
         </div>
       )}
 
-      {/* Signature pad (only if not yet signed) */}
-      {!isSigned && !isPaid && (
+      {/* Signature pad (only if not yet signed and tier is selected) */}
+      {!isSigned && !isPaid && !needsTierSelection && (
         <div className="card">
           {signError && (
             <p style={{ color: '#dc2626', fontSize: 13, marginBottom: 12 }}>{signError}</p>
