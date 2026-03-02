@@ -177,6 +177,12 @@ async function initDB() {
   await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS payment_status TEXT DEFAULT 'unpaid'`);
   await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS stripe_session_id TEXT`);
 
+  // Add per-tier pricing columns for "let client choose" proposals
+  await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS professional_price NUMERIC`);
+  await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS regional_price NUMERIC`);
+  await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS enterprise_price NUMERIC`);
+  await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS selected_tier TEXT`);
+
   // Admin users table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS admin_users (
@@ -718,6 +724,9 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
     data.totalPrice = data.totalPrice ?? data.total_price;
     data.proposalNum = data.proposalNum ?? data.proposal_num;
     data.vimeoUrl = data.vimeoUrl ?? data.vimeo_url;
+    data.professionalPrice = data.professionalPrice ?? data.professional_price;
+    data.regionalPrice = data.regionalPrice ?? data.regional_price;
+    data.enterprisePrice = data.enterprisePrice ?? data.enterprise_price;
 
     if (!data.email || !data.contactName || !data.company) {
       return res.status(400).json({ error: 'Missing required fields: email, contactName, and company are required' });
@@ -742,15 +751,16 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
     await pool.query(`
       INSERT INTO proposals (id, proposal_num, contact_name, company, email, tier, tier_price,
         extra_trainees, extra_kits, tracks, videography, on_roof_day, total_price,
-        let_client_choose, vimeo_url)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+        let_client_choose, vimeo_url, professional_price, regional_price, enterprise_price)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
     `, [
       id, data.proposalNum, data.contactName, data.company, data.email,
       data.tier ?? null, data.tierPrice ?? null,
       data.extraTrainees ?? 0, data.extraKits ?? 0,
       data.tracks ?? [], data.videography ?? false, data.onRoofDay ?? false,
       data.totalPrice ?? null, data.letClientChoose ?? false,
-      data.vimeoUrl ?? null
+      data.vimeoUrl ?? null,
+      data.professionalPrice ?? null, data.regionalPrice ?? null, data.enterprisePrice ?? null
     ]);
 
     // Build email and PDF
@@ -873,6 +883,112 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
   } catch (err) {
     console.error('Error signing proposal:', err);
     res.status(500).json({ error: 'Failed to sign proposal' });
+  }
+});
+
+// ── POST /api/proposals/:id/select-tier ──────────────────────────
+// Client selects a tier on a "let client choose" proposal
+app.post('/api/proposals/:id/select-tier', proposalViewLimiter, async (req, res) => {
+  try {
+    const { tier } = req.body;
+    const validTiers = ['professional', 'regional', 'enterprise'];
+    if (!tier || !validTiers.includes(tier)) {
+      return res.status(400).json({ error: 'Invalid tier selection' });
+    }
+
+    const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Proposal not found' });
+
+    const proposal = rows[0];
+    if (!proposal.let_client_choose) {
+      return res.status(400).json({ error: 'This proposal does not allow tier selection' });
+    }
+    if (proposal.status === 'signed') {
+      return res.status(409).json({ error: 'This proposal has already been signed' });
+    }
+
+    // Look up the price for the selected tier
+    const priceColumn = `${tier}_price`;
+    const tierPrice = proposal[priceColumn];
+    if (!tierPrice || Number(tierPrice) <= 0) {
+      return res.status(400).json({ error: 'No price available for this tier' });
+    }
+
+    const { rows: updated } = await pool.query(
+      `UPDATE proposals SET selected_tier = $1, tier = $1, total_price = $2
+       WHERE id = $3 RETURNING *`,
+      [tier, tierPrice, req.params.id]
+    );
+
+    res.json(updated[0]);
+  } catch (err) {
+    console.error('Error selecting tier:', err);
+    res.status(500).json({ error: 'Failed to select tier' });
+  }
+});
+
+// ── Tier add-on rates for package pricing ──────────────────────────
+const TIER_ADDON_RATES = {
+  professional: { baseTrainees: 3, baseKits: 1, baseTracks: 0, traineeRate: 2000, kitRate: 4000, trackRate: 5000, videoRate: 2000, onRoofRate: 5000 },
+  regional: { baseTrainees: 10, baseKits: 2, baseTracks: 2, traineeRate: 1600, kitRate: 4000, trackRate: 5000, videoRate: 0, onRoofRate: 5000 },
+  enterprise: { baseTrainees: 25, baseKits: 4, baseTracks: 4, traineeRate: 0, kitRate: 4000, trackRate: 0, videoRate: 0, onRoofRate: 0 },
+};
+
+// ── POST /api/proposals/:id/configure ────────────────────────────
+// Full package configuration for "let client choose" proposals
+app.post('/api/proposals/:id/configure', proposalViewLimiter, async (req, res) => {
+  try {
+    const { tier, extraTrainees, extraKits, tracks, videography, onRoofDay } = req.body;
+    const validTiers = ['professional', 'regional', 'enterprise'];
+    if (!tier || !validTiers.includes(tier)) {
+      return res.status(400).json({ error: 'Invalid tier selection' });
+    }
+
+    const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Proposal not found' });
+    const proposal = rows[0];
+
+    if (!proposal.let_client_choose) {
+      return res.status(400).json({ error: 'This proposal does not allow package configuration' });
+    }
+    if (proposal.status === 'signed') {
+      return res.status(409).json({ error: 'This proposal has already been signed' });
+    }
+
+    const basePrice = Number(proposal[`${tier}_price`]) || 0;
+    if (basePrice <= 0) {
+      return res.status(400).json({ error: 'No base price available for this tier' });
+    }
+
+    const rates = TIER_ADDON_RATES[tier];
+    const extraTraineeCount = Math.max(0, parseInt(extraTrainees) || 0);
+    const extraKitCount = Math.max(0, parseInt(extraKits) || 0);
+    const validTrackNames = ['Sales', 'Service', 'Production', 'Marketing'];
+    const trackList = Array.isArray(tracks) ? tracks.filter(t => validTrackNames.includes(t)) : [];
+    const extraTrackCount = Math.max(0, trackList.length - rates.baseTracks);
+    const hasVideo = !!videography;
+    const hasOnRoof = !!onRoofDay;
+
+    let totalPrice = basePrice;
+    totalPrice += extraTraineeCount * rates.traineeRate;
+    totalPrice += extraKitCount * rates.kitRate;
+    if (extraTrackCount > 0) totalPrice += extraTrackCount * rates.trackRate;
+    if (hasVideo) totalPrice += rates.videoRate;
+    if (hasOnRoof) totalPrice += rates.onRoofRate;
+
+    const { rows: updated } = await pool.query(
+      `UPDATE proposals SET
+        selected_tier = $1, tier = $1, total_price = $2,
+        extra_trainees = $3, extra_kits = $4, tracks = $5,
+        videography = $6, on_roof_day = $7
+       WHERE id = $8 RETURNING *`,
+      [tier, totalPrice, extraTraineeCount, extraKitCount, trackList, hasVideo, hasOnRoof, req.params.id]
+    );
+
+    res.json(updated[0]);
+  } catch (err) {
+    console.error('Error configuring proposal:', err);
+    res.status(500).json({ error: 'Failed to configure proposal' });
   }
 });
 

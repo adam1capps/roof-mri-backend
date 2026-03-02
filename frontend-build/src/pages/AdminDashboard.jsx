@@ -20,7 +20,8 @@ function ProposalForm({ onSent }) {
     contactName: '', company: '', email: '', tier: 'professional',
     totalPrice: '', extraTrainees: '0', extraKits: '0',
     videography: false, onRoofDay: false, vimeoUrl: '',
-    letClientChoose: false, proposalNum: ''
+    letClientChoose: false, proposalNum: '',
+    professionalPrice: '', regionalPrice: '', enterprisePrice: ''
   })
   const [sending, setSending] = useState(false)
   const [result, setResult] = useState(null)
@@ -52,7 +53,10 @@ function ProposalForm({ onSent }) {
         onRoofDay: form.onRoofDay,
         vimeoUrl: form.vimeoUrl || null,
         letClientChoose: form.letClientChoose,
-        proposalNum: form.proposalNum || null
+        proposalNum: form.proposalNum || null,
+        professionalPrice: form.letClientChoose ? (Number(form.professionalPrice) || null) : null,
+        regionalPrice: form.letClientChoose ? (Number(form.regionalPrice) || null) : null,
+        enterprisePrice: form.letClientChoose ? (Number(form.enterprisePrice) || null) : null,
       }
 
       const res = await fetch(`${API}/api/send-proposal`, {
@@ -68,7 +72,8 @@ function ProposalForm({ onSent }) {
         contactName: '', company: '', email: '', tier: 'professional',
         totalPrice: '', extraTrainees: '0', extraKits: '0',
         videography: false, onRoofDay: false, vimeoUrl: '',
-        letClientChoose: false, proposalNum: ''
+        letClientChoose: false, proposalNum: '',
+        professionalPrice: '', regionalPrice: '', enterprisePrice: ''
       })
       if (onSent) onSent()
     } catch (err) {
@@ -123,7 +128,7 @@ function ProposalForm({ onSent }) {
           </label>
         </div>
 
-        {!form.letClientChoose && (
+        {!form.letClientChoose ? (
           <>
             <div className="admin-row">
               <div className="admin-field">
@@ -148,6 +153,23 @@ function ProposalForm({ onSent }) {
               <div className="admin-field">
                 <label>Extra Kits</label>
                 <input type="number" value={form.extraKits} onChange={set('extraKits')} min="0" />
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="admin-row" style={{ gap: '10px' }}>
+              <div className="admin-field">
+                <label>Professional Price ($)</label>
+                <input type="number" value={form.professionalPrice} onChange={set('professionalPrice')} min="0" step="0.01" placeholder="3 trainees, 1 kit" />
+              </div>
+              <div className="admin-field">
+                <label>Regional Price ($)</label>
+                <input type="number" value={form.regionalPrice} onChange={set('regionalPrice')} min="0" step="0.01" placeholder="10 trainees, 2 kits" />
+              </div>
+              <div className="admin-field">
+                <label>Enterprise Price ($)</label>
+                <input type="number" value={form.enterprisePrice} onChange={set('enterprisePrice')} min="0" step="0.01" placeholder="25 trainees, 4 kits" />
               </div>
             </div>
           </>
