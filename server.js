@@ -927,6 +927,71 @@ app.post('/api/proposals/:id/select-tier', proposalViewLimiter, async (req, res)
   }
 });
 
+// ── Tier add-on rates for package pricing ──────────────────────────
+const TIER_ADDON_RATES = {
+  professional: { baseTrainees: 3, baseKits: 1, baseTracks: 0, traineeRate: 2000, kitRate: 4000, trackRate: 5000, videoRate: 2000, onRoofRate: 5000 },
+  regional: { baseTrainees: 10, baseKits: 2, baseTracks: 2, traineeRate: 1600, kitRate: 4000, trackRate: 5000, videoRate: 0, onRoofRate: 5000 },
+  enterprise: { baseTrainees: 25, baseKits: 4, baseTracks: 4, traineeRate: 0, kitRate: 4000, trackRate: 0, videoRate: 0, onRoofRate: 0 },
+};
+
+// ── POST /api/proposals/:id/configure ────────────────────────────
+// Full package configuration for "let client choose" proposals
+app.post('/api/proposals/:id/configure', proposalViewLimiter, async (req, res) => {
+  try {
+    const { tier, extraTrainees, extraKits, tracks, videography, onRoofDay } = req.body;
+    const validTiers = ['professional', 'regional', 'enterprise'];
+    if (!tier || !validTiers.includes(tier)) {
+      return res.status(400).json({ error: 'Invalid tier selection' });
+    }
+
+    const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Proposal not found' });
+    const proposal = rows[0];
+
+    if (!proposal.let_client_choose) {
+      return res.status(400).json({ error: 'This proposal does not allow package configuration' });
+    }
+    if (proposal.status === 'signed') {
+      return res.status(409).json({ error: 'This proposal has already been signed' });
+    }
+
+    const basePrice = Number(proposal[`${tier}_price`]) || 0;
+    if (basePrice <= 0) {
+      return res.status(400).json({ error: 'No base price available for this tier' });
+    }
+
+    const rates = TIER_ADDON_RATES[tier];
+    const extraTraineeCount = Math.max(0, parseInt(extraTrainees) || 0);
+    const extraKitCount = Math.max(0, parseInt(extraKits) || 0);
+    const validTrackNames = ['Sales', 'Service', 'Production', 'Marketing'];
+    const trackList = Array.isArray(tracks) ? tracks.filter(t => validTrackNames.includes(t)) : [];
+    const extraTrackCount = Math.max(0, trackList.length - rates.baseTracks);
+    const hasVideo = !!videography;
+    const hasOnRoof = !!onRoofDay;
+
+    let totalPrice = basePrice;
+    totalPrice += extraTraineeCount * rates.traineeRate;
+    totalPrice += extraKitCount * rates.kitRate;
+    if (extraTrackCount > 0) totalPrice += extraTrackCount * rates.trackRate;
+    if (hasVideo) totalPrice += rates.videoRate;
+    if (hasOnRoof) totalPrice += rates.onRoofRate;
+
+    const { rows: updated } = await pool.query(
+      `UPDATE proposals SET
+        selected_tier = $1, tier = $1, total_price = $2,
+        extra_trainees = $3, extra_kits = $4, tracks = $5,
+        videography = $6, on_roof_day = $7
+       WHERE id = $8 RETURNING *`,
+      [tier, totalPrice, extraTraineeCount, extraKitCount, trackList, hasVideo, hasOnRoof, req.params.id]
+    );
+
+    res.json(updated[0]);
+  } catch (err) {
+    console.error('Error configuring proposal:', err);
+    res.status(500).json({ error: 'Failed to configure proposal' });
+  }
+});
+
 // ── POST /api/proposals/:id/checkout ──────────────────────────────
 // Create a Stripe Checkout session so the client can pay after signing
 app.post('/api/proposals/:id/checkout', checkoutLimiter, async (req, res) => {
