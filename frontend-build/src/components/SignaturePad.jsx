@@ -8,14 +8,23 @@ export default function SignaturePad({ onSign, companyName, disabled }) {
   const [submitting, setSubmitting] = useState(false)
   const [signed, setSigned] = useState(false)
   const [signedAt, setSignedAt] = useState(null)
+  const [error, setError] = useState(null)
+  const [validationError, setValidationError] = useState(null)
 
   const redryDate = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
 
   async function handleSubmit() {
-    if (!clientSig.trim()) return
-    if (!clientName.trim()) return
-    if (!clientTitle.trim()) return
-    if (!clientEmail.trim() || clientEmail.indexOf('@') < 1) return
+    setValidationError(null)
+    setError(null)
+
+    if (!clientSig.trim() || !clientName.trim() || !clientTitle.trim()) {
+      setValidationError('Please fill in all fields before signing.')
+      return
+    }
+    if (!clientEmail.trim() || clientEmail.indexOf('@') < 1) {
+      setValidationError('Please enter a valid email address.')
+      return
+    }
 
     setSubmitting(true)
     try {
@@ -33,7 +42,8 @@ export default function SignaturePad({ onSign, companyName, disabled }) {
       await onSign(clientSig.trim(), JSON.stringify(signData))
       setSigned(true)
       setSignedAt(now)
-    } catch {
+    } catch (err) {
+      setError(err.message || 'Failed to sign. Please try again.')
       setSubmitting(false)
     }
   }
@@ -132,6 +142,12 @@ export default function SignaturePad({ onSign, companyName, disabled }) {
             </div>
             <span className="sig-label">Date</span>
           </div>
+
+          {(validationError || error) && !signed && !disabled && (
+            <p style={{ color: '#dc2626', fontSize: 13, textAlign: 'center', margin: '8px 0 0' }}>
+              {validationError || error}
+            </p>
+          )}
 
           {!signed && !disabled && (
             <button
