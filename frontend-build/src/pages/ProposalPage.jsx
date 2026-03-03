@@ -125,9 +125,16 @@ export default function ProposalPage() {
   function buildPackageSummary(p) {
     const t = p.selected_tier || p.tier
     if (!t) return
-    const c = { professional: { baseTrainees: 3, baseKits: 1, baseTracks: 0, traineeRate: 2000, kitRate: 4000, trackRate: 5000, videoRate: 2000, onRoofRate: 5000 }, regional: { baseTrainees: 10, baseKits: 2, baseTracks: 2, traineeRate: 1600, kitRate: 4000, trackRate: 5000, videoRate: 0, onRoofRate: 5000 }, enterprise: { baseTrainees: 25, baseKits: 4, baseTracks: 4, traineeRate: 0, kitRate: 4000, trackRate: 0, videoRate: 0, onRoofRate: 0 } }[t]
+    const configs = {
+      professional: { base: 10000, baseTrainees: 3, baseKits: 1, baseTracks: 0, traineeRate: 2000, kitRate: 4000, trackRate: 5000, videoRate: 2000, onRoofRate: 5000 },
+      regional: { base: 35000, baseTrainees: 10, baseKits: 2, baseTracks: 2, traineeRate: 1600, kitRate: 4000, trackRate: 5000, videoRate: 0, onRoofRate: 5000 },
+      enterprise: { base: 75000, baseTrainees: 25, baseKits: 4, baseTracks: 4, traineeRate: 0, kitRate: 4000, trackRate: 0, videoRate: 0, onRoofRate: 0 },
+    }
+    const c = configs[t]
     if (!c) return
-    setPackageSummary({ tier: t, config: c, proposal: p })
+    // Use the tier-specific price from the proposal if available, otherwise fallback to hardcoded base
+    const tierBasePrice = Number(p[`${t}_price`]) || c.base
+    setPackageSummary({ tier: t, config: { ...c, base: tierBasePrice }, proposal: p })
   }
 
   // Handlers
@@ -157,18 +164,25 @@ export default function ProposalPage() {
 
   async function handleSign(signatureName, signatureData) {
     setSignError(null)
-    const res = await fetch(`${API}/api/proposals/${id}/sign`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signatureName, signatureData }),
-    })
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}))
-      throw new Error(data.error || 'Failed to sign')
+    try {
+      const res = await fetch(`${API}/api/proposals/${id}/sign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ signatureName, signatureData }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        const msg = data.error || 'Failed to sign'
+        setSignError(msg)
+        throw new Error(msg)
+      }
+      setProposal((prev) => ({ ...prev, status: 'signed', signature_name: signatureName, signed_at: new Date().toISOString() }))
+      setJustSigned(true)
+      setFabMode('hidden')
+    } catch (err) {
+      setSignError(err.message || 'Failed to sign proposal')
+      throw err
     }
-    setProposal((prev) => ({ ...prev, status: 'signed', signature_name: signatureName }))
-    setJustSigned(true)
-    setFabMode('hidden')
   }
 
   async function handlePayNow() {
@@ -223,7 +237,7 @@ export default function ProposalPage() {
   const isConfigured = !!(proposal.tier || proposal.selected_tier)
   const isSigned = proposal.status === 'signed'
   const isPaid = proposal.payment_status === 'paid'
-  const hasPrice = proposal.total_price && Number(proposal.total_price) > 0
+  const hasPrice = proposal.total_price != null && Number(proposal.total_price) > 0
   const needsConfiguration = proposal.let_client_choose && !isConfigured
   const proposalDate = proposal.created_at
     ? new Date(proposal.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
@@ -334,7 +348,7 @@ export default function ProposalPage() {
               <div className="pkg-sum-body">
                 <div className="pkg-line-item">
                   <div><span className="line-label">{TIER_NAMES[packageSummary.tier]} Package (base)</span></div>
-                  <span className="line-value">{fmt(tierPrices[packageSummary.tier] || packageSummary.config.base || proposal.total_price)}</span>
+                  <span className="line-value">{fmt(packageSummary.config.base)}</span>
                 </div>
                 <div className="pkg-line-item">
                   <div>

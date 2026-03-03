@@ -41,6 +41,24 @@ function ProposalForm({ onSent }) {
     setSending(true)
 
     try {
+      // Validate prices
+      if (form.letClientChoose) {
+        const hasProPrice = Number(form.professionalPrice) > 0
+        const hasRegPrice = Number(form.regionalPrice) > 0
+        const hasEntPrice = Number(form.enterprisePrice) > 0
+        if (!hasProPrice && !hasRegPrice && !hasEntPrice) {
+          setError('Please enter a price for at least one package tier.')
+          setSending(false)
+          return
+        }
+      } else {
+        if (!Number(form.totalPrice) || Number(form.totalPrice) <= 0) {
+          setError('Please enter the total price for the proposal.')
+          setSending(false)
+          return
+        }
+      }
+
       const body = {
         contactName: form.contactName,
         company: form.company,

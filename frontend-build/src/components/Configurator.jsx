@@ -53,7 +53,9 @@ export default function Configurator({ prices, onConfirm, onClose, submitting })
   const steps = getSteps(tier)
   const stepId = steps[currentStep]
   const c = tier ? TIER_CONFIG[tier] : null
-  const basePrice = tier && prices ? (Number(prices[tier]) || c.base) : 0
+  // Use the actual tier price from DB — don't fall back to hardcoded default
+  // since the server will reject configuration if the DB price is null/0
+  const basePrice = tier && prices && Number(prices[tier]) > 0 ? Number(prices[tier]) : 0
 
   function calcTotal() {
     if (!tier || !c) return 0
@@ -134,19 +136,21 @@ export default function Configurator({ prices, onConfirm, onClose, submitting })
               <p className="step-desc">Select the training tier that best fits your team.</p>
               <div className="config-tier-grid">
                 {Object.entries(TIER_CONFIG).map(([key, tc]) => {
-                  const price = prices ? prices[key] : null
-                  const displayPrice = price && Number(price) > 0 ? fmt(Number(price)) : fmt(tc.base)
+                  const price = prices ? Number(prices[key]) : 0
+                  const hasPrice = price > 0
+                  const displayPrice = hasPrice ? fmt(price) : fmt(tc.base)
                   return (
                     <div
                       key={key}
-                      className={`config-tier-card ${tier === key ? 'selected' : ''}`}
-                      onClick={() => selectTier(key)}
+                      className={`config-tier-card ${tier === key ? 'selected' : ''} ${!hasPrice ? 'disabled' : ''}`}
+                      onClick={() => hasPrice && selectTier(key)}
+                      style={!hasPrice ? { opacity: 0.4, cursor: 'not-allowed' } : {}}
                     >
                       <div className="config-tier-left">
                         <span className="ctier-name">{tc.name}</span>
                         <span className="ctier-desc">{tc.desc}</span>
                       </div>
-                      <span className="config-tier-right">{displayPrice}</span>
+                      <span className="config-tier-right">{hasPrice ? displayPrice : 'N/A'}</span>
                     </div>
                   )
                 })}
