@@ -53,6 +53,10 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 /* ── Brand / Logo ──────────────────────────────── */
+.proposal-logo {
+  max-width: 200px;
+  height: auto;
+}
 .proposal-brand {
   text-align: center;
 }
@@ -1053,7 +1057,7 @@ span.included {
 
 /* Progress */
 .config-progress {
-  padding: 24px 28px 0;
+  padding: 24px 56px 0 28px;
 }
 .config-progress-bar {
   height: 4px;

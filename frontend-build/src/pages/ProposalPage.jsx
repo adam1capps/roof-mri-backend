@@ -252,10 +252,8 @@ export default function ProposalPage() {
   return (
     <div className="container">
       {/* LOGO */}
-      <div style={{ marginBottom: 32 }}>
-        <div className="proposal-brand">
-          <div className="brand-name">ROOF <span className="accent">MRI</span></div>
-        </div>
+      <div style={{ marginBottom: 32, textAlign: 'center' }}>
+        <img src="/roof-mri-logo.png" alt="Roof MRI" className="proposal-logo" />
       </div>
 
       {/* HEADER */}
