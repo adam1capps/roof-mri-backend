@@ -259,21 +259,29 @@ export default function ProposalPage() {
       </div>
 
       {/* HEADER */}
-      <div className="proposal-header">
-        <div className="proposal-brand">
-          <div className="brand-sub">Certification Training Proposal</div>
-        </div>
-        <div className="proposal-meta">
-          <span className="meta-label">Prepared For</span>
-          <span className="meta-value">{proposal.company}</span>
-          <span className="meta-label">Date</span>
-          <span className="meta-value">{proposalDate}</span>
-          {proposal.proposal_num && (
-            <>
-              <span className="meta-label">Proposal #</span>
-              <span className="meta-value">{proposal.proposal_num}</span>
-            </>
-          )}
+      <div className="proposal-header-v2">
+        <div className="ph2-accent"></div>
+        <div className="ph2-content">
+          <span className="ph2-type">Certification Training Proposal</span>
+          <h2 className="ph2-company">{proposal.company}</h2>
+          <div className="ph2-details">
+            <div className="ph2-detail">
+              <span className="ph2-detail-label">Date</span>
+              <span className="ph2-detail-value">{proposalDate}</span>
+            </div>
+            {proposal.proposal_num && (
+              <div className="ph2-detail">
+                <span className="ph2-detail-label">Proposal #</span>
+                <span className="ph2-detail-value">{proposal.proposal_num}</span>
+              </div>
+            )}
+            {proposal.contact_name && (
+              <div className="ph2-detail">
+                <span className="ph2-detail-label">Attention</span>
+                <span className="ph2-detail-value">{proposal.contact_name}</span>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 

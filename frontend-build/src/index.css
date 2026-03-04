@@ -76,7 +76,65 @@ h1, h2, h3, h4, h5, h6 {
   margin-top: 2px;
 }
 
-/* ── Proposal Header ──────────────────────────── */
+/* ── Proposal Header v2 ──────────────────────── */
+.proposal-header-v2 {
+  display: flex;
+  background: var(--white);
+  border: 1px solid var(--gray200);
+  border-radius: 16px;
+  overflow: hidden;
+  margin-bottom: 32px;
+}
+.ph2-accent {
+  width: 6px;
+  flex-shrink: 0;
+  background: var(--green);
+}
+.ph2-content {
+  padding: 28px 32px;
+  flex: 1;
+}
+.ph2-type {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--green);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  margin-bottom: 6px;
+}
+.ph2-company {
+  font-family: var(--font-heading);
+  font-size: 26px;
+  font-weight: 800;
+  color: var(--navy);
+  margin-bottom: 16px;
+  line-height: 1.2;
+}
+.ph2-details {
+  display: flex;
+  gap: 32px;
+  flex-wrap: wrap;
+}
+.ph2-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ph2-detail-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--gray400);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.ph2-detail-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--navy);
+}
+
+/* Legacy header (keep for backwards compat) */
 .proposal-header {
   background: var(--navy);
   border-radius: 16px;
@@ -1739,6 +1797,15 @@ span.included {
   }
   .proposal-header {
     padding: 28px 24px;
+  }
+  .ph2-content {
+    padding: 22px 20px;
+  }
+  .ph2-company {
+    font-size: 22px;
+  }
+  .ph2-details {
+    gap: 20px;
   }
   .proposal-intro h1 {
     font-size: 26px;

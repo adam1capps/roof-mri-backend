@@ -21,7 +21,7 @@ function ProposalForm({ onSent }) {
     totalPrice: '', extraTrainees: '0', extraKits: '0',
     videography: false, onRoofDay: false, vimeoUrl: '',
     letClientChoose: false, proposalNum: '',
-    professionalPrice: '', regionalPrice: '', enterprisePrice: ''
+    professionalPrice: '10000', regionalPrice: '35000', enterprisePrice: '75000'
   })
   const [sending, setSending] = useState(false)
   const [result, setResult] = useState(null)
@@ -91,7 +91,7 @@ function ProposalForm({ onSent }) {
         totalPrice: '', extraTrainees: '0', extraKits: '0',
         videography: false, onRoofDay: false, vimeoUrl: '',
         letClientChoose: false, proposalNum: '',
-        professionalPrice: '', regionalPrice: '', enterprisePrice: ''
+        professionalPrice: '10000', regionalPrice: '35000', enterprisePrice: '75000'
       })
       if (onSent) onSent()
     } catch (err) {
