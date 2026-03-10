@@ -42,24 +42,62 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
-  if (event.type === 'checkout.session.completed') {
+  // ── Idempotency: skip already-processed events ──────────────────
+  try {
+    const { rowCount } = await pool.query(
+      `INSERT INTO webhook_events (stripe_event_id) VALUES ($1) ON CONFLICT DO NOTHING`,
+      [event.id]
+    );
+    if (rowCount === 0) {
+      // Already processed this event – return 200 so Stripe stops retrying
+      return res.json({ received: true, duplicate: true });
+    }
+  } catch (idempotencyErr) {
+    console.error('Webhook idempotency check failed:', idempotencyErr);
+    // Continue processing – better to risk a duplicate than drop the event
+  }
+
+  // Handle both immediate (card) and async (ACH bank transfer) payments
+  const paymentEvents = ['checkout.session.completed', 'checkout.session.async_payment_succeeded'];
+  if (paymentEvents.includes(event.type)) {
     const session = event.data.object;
     const proposalId = session.metadata?.proposal_id;
+
+    // For checkout.session.completed with async payment (ACH), payment isn't final yet
+    if (event.type === 'checkout.session.completed' && session.payment_status === 'unpaid') {
+      // ACH initiated but not yet settled – update status to pending
+      if (proposalId) {
+        try {
+          await pool.query(
+            `UPDATE proposals SET payment_status = 'processing', stripe_session_id = $1 WHERE id = $2`,
+            [session.id, proposalId]
+          );
+        } catch (err) {
+          console.error('Error updating to processing:', err);
+        }
+      }
+      return res.json({ received: true });
+    }
+
     if (proposalId) {
       try {
         await pool.query(
           `UPDATE proposals SET payment_status = 'paid', stripe_session_id = $1 WHERE id = $2`,
           [session.id, proposalId]
         );
-        // Notify Adam of payment
         const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [proposalId]);
         if (rows.length > 0) {
           const p = rows[0];
-          const safeName = stripHtml(p.contact_name);
-          const safeCompany = stripHtml(p.company);
+          const safeName = escapeHtml(p.contact_name);
+          const safeCompany = escapeHtml(p.company);
+          const totalFormatted = p.total_price ? '$' + Number(p.total_price).toLocaleString() : 'N/A';
+          const tierLabel = p.tier ? p.tier.charAt(0).toUpperCase() + p.tier.slice(1) : 'Custom';
+
+          // Notify Adam of payment
+          let emailSent = false;
           await sgMail.send({
             to: 'adam@re-dry.com',
-            from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
+            from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
             subject: `PAID: ${safeCompany} - ${safeName}`,
             html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
               <div style="background:#1B2A4A;padding:16px 20px;text-align:center">
@@ -67,14 +105,75 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
               </div>
               <div style="padding:20px;background:#fff;border:1px solid #e2e8f0">
                 <p style="font-size:14px;color:#374151"><strong>Payment received</strong> from ${safeName} at ${safeCompany}</p>
-                <p style="font-size:13px;color:#64748b">${p.total_price ? '$' + Number(p.total_price).toLocaleString() : 'N/A'}</p>
+                <p style="font-size:13px;color:#64748b">${tierLabel} Package | ${totalFormatted}</p>
               </div>
             </div>`
           });
+
+          // Send payment confirmation to client
+          try {
+            await sgMail.send({
+              to: p.email,
+              from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
+              subject: `Payment Confirmed - Roof MRI Training`,
+              html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
+                <div style="background:#1B2A4A;padding:16px 20px;text-align:center">
+                  <span style="color:#fff;font-size:18px;font-weight:700">ROOF <span style="color:#00bd70">MRI</span></span>
+                </div>
+                <div style="padding:24px;background:#fff;border:1px solid #e2e8f0">
+                  <div style="text-align:center;margin-bottom:20px">
+                    <div style="display:inline-block;background:#ecfdf5;border-radius:50%;padding:12px;margin-bottom:8px">
+                      <span style="color:#00bd70;font-size:24px;font-weight:bold">\u2713</span>
+                    </div>
+                    <h2 style="color:#1B2A4A;margin:8px 0 0 0;font-size:20px">Payment Confirmed</h2>
+                  </div>
+                  <p style="font-size:14px;color:#374151;line-height:1.6;margin-bottom:16px">Hi ${safeName},</p>
+                  <p style="font-size:14px;color:#374151;line-height:1.6;margin-bottom:16px">We\u2019ve received your payment. Thank you for choosing Roof MRI! Here\u2019s your receipt summary:</p>
+                  <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:16px;margin-bottom:16px">
+                    <table style="width:100%;border-collapse:collapse">
+                      <tr><td style="padding:6px 0;font-size:13px;color:#64748b">Package</td><td style="padding:6px 0;font-size:13px;color:#1B2A4A;text-align:right;font-weight:600">${tierLabel}</td></tr>
+                      <tr><td style="padding:6px 0;font-size:13px;color:#64748b">Company</td><td style="padding:6px 0;font-size:13px;color:#1B2A4A;text-align:right">${safeCompany}</td></tr>
+                      <tr style="border-top:1px solid #e2e8f0"><td style="padding:10px 0 6px;font-size:14px;color:#1B2A4A;font-weight:700">Total Paid</td><td style="padding:10px 0 6px;font-size:14px;color:#00bd70;text-align:right;font-weight:700">${totalFormatted}</td></tr>
+                    </table>
+                  </div>
+                  <p style="font-size:14px;color:#374151;line-height:1.6;margin-bottom:8px"><strong>What\u2019s next?</strong></p>
+                  <p style="font-size:14px;color:#374151;line-height:1.6;margin-bottom:16px">We\u2019ll be in touch within 1\u20132 business days to coordinate your training dates and logistics. If you have questions in the meantime, just reply to this email.</p>
+                  <p style="font-size:14px;color:#1B2A4A;font-weight:600;margin:0">Adam Capps</p>
+                  <p style="font-size:13px;color:#64748b;margin:2px 0 0 0">Founder, Roof MRI & ReDry</p>
+                  <p style="font-size:13px;color:#64748b;margin:2px 0 0 0">adam@re-dry.com</p>
+                </div>
+                <div style="background:#1B2A4A;padding:12px 20px;text-align:center">
+                  <p style="margin:0;font-size:11px;color:#94a3b8">Roof MRI | Advancing the Science of Roof Moisture Detection</p>
+                </div>
+              </div>`
+            });
+            emailSent = true;
+          } catch (clientEmailErr) {
+            console.error('Failed to send payment confirmation to client:', clientEmailErr);
+          }
+
+          // Track whether confirmation emails were sent
+          await pool.query('UPDATE proposals SET email_sent = $1 WHERE id = $2', [emailSent, proposalId]);
         }
       } catch (webhookErr) {
         console.error('Webhook processing error:', webhookErr);
         return res.status(500).json({ error: 'Webhook processing failed' });
+      }
+    }
+  }
+
+  // Handle failed async payments (ACH failures)
+  if (event.type === 'checkout.session.async_payment_failed') {
+    const session = event.data.object;
+    const proposalId = session.metadata?.proposal_id;
+    if (proposalId) {
+      try {
+        await pool.query(
+          `UPDATE proposals SET payment_status = 'failed' WHERE id = $1`,
+          [proposalId]
+        );
+      } catch (err) {
+        console.error('Error updating failed payment:', err);
       }
     }
   }
@@ -192,12 +291,29 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+
+  // Webhook idempotency table – prevents duplicate processing of Stripe events
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS webhook_events (
+      stripe_event_id TEXT PRIMARY KEY,
+      processed_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  // Track whether confirmation emails were sent successfully
+  await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS email_sent BOOLEAN DEFAULT false`);
+
+  // Indexes for common queries
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_proposals_created_at ON proposals(created_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_proposals_payment_status ON proposals(payment_status)`);
+
   console.log('Database initialized');
 }
 
 // ── Generate short unique ID ───────────────────────────────────────
 function generateId() {
-  return crypto.randomBytes(6).toString('base64url');
+  return crypto.randomBytes(16).toString('base64url');
 }
 
 // ── Build branded HTML email ───────────────────────────────────────
@@ -587,10 +703,377 @@ function buildProposalPdf(data, proposalUrl) {
   });
 }
 
+// ── Generate signed contract PDF ─────────────────────────────────
+const TERMS_SECTIONS = [
+  {
+    title: 'Acknowledgment of Roofing Industry Knowledge',
+    content: [
+      'Client represents that each trainee participating in the Roof MRI training has a basic working knowledge of roofing systems and job site safety procedures.',
+    ],
+  },
+  {
+    title: 'Certification, Continuing Education, and Transferability',
+    content: [
+      'Certification is issued to individual participants only and cannot be transferred to other persons or companies.',
+      'A company may represent itself as having \u201cRoof MRI certified staff\u201d only if at least one of its current employees holds an active certification. If a certified employee leaves the company, the company may no longer claim to have certified staff unless others are certified.',
+    ],
+    subsections: [
+      {
+        label: '(a) Continuing Education Requirement',
+        text: 'Each certified individual must complete a minimum of two (2) continuing training education (CTE) credits per calendar year to maintain active certification status. CTE credit opportunities will be made available by ReDry. Failure to complete the required credits by December 31 of each calendar year will result in suspension of certification until credits are fulfilled.',
+      },
+      {
+        label: '(b) Company Association',
+        text: 'Each certified individual\u2019s certification is associated with the company under which they were trained. The individual may only represent themselves as a Roof MRI Certified Technician while employed by or actively contracted with that company.',
+      },
+      {
+        label: '(c) Non-Transferability',
+        text: 'Certification does not transfer to a new employer. If a certified individual leaves the company under which they were trained, their certification becomes inactive with respect to any new employer unless both of the following conditions are met: (i) the original certifying company provides explicit written permission authorizing the transfer, and (ii) the new employer is also a certified Roof MRI contractor in good standing. Without both conditions satisfied, the new employer must complete its own certification engagement to utilize Roof MRI services.',
+      },
+    ],
+  },
+  {
+    title: 'Training Requirements and Equipment',
+    subsections: [
+      {
+        label: '(a) Pre-Field Training Roof List',
+        text: 'No later than three (3) business days prior to field training, Client must provide a list of commercial flat or low-slope roofs for use in training. No shingle, metal, or steep-slope roofs will be accepted. Client is responsible for securing roof access and ensuring the roofs are safe for training. Failure to provide the roof list on time may result in cancellation or rescheduling of training.',
+      },
+      {
+        label: '(b) Equipment',
+        text: 'Each trainee must bring a qualifying moisture detection device. ReDry will provide equipment specifications beforehand. Limited loaner devices may be available but are not guaranteed. Any borrowed equipment must be returned in original condition or will be billed to Client.',
+      },
+    ],
+  },
+  {
+    title: 'Payment, Cancellation, and Rescheduling',
+    subsections: [
+      {
+        label: '(a) Professional Tier Payment',
+        text: 'Professional packages require payment in full at the time of booking. Training will not be scheduled until full payment has been received.',
+      },
+      {
+        label: '(b) Regional Tier Payment',
+        text: 'Regional packages require a non-refundable deposit of fifty percent (50%) of the total package price at the time of booking. The remaining balance is due no later than five (5) business days prior to the scheduled training date.',
+      },
+      {
+        label: '(c) Enterprise Tier Payment',
+        text: 'Enterprise engagements are scoped and priced through a consultative process. Enterprise pricing is not finalized through the online configurator. A custom statement of work will be issued following consultation, and payment terms will be defined therein.',
+      },
+      {
+        label: '(d) Non-Performance for Non-Payment',
+        text: 'Training will not commence until all outstanding balances have been received in full. ReDry reserves the right to postpone or cancel any scheduled training for which payment has not been received by the required due date, without liability to Client.',
+      },
+      {
+        label: '(e) Client Cancellation',
+        text: 'All deposits are non-refundable. If Client cancels for any reason after the deposit has been paid, no portion of the deposit or any payments made shall be returned.',
+      },
+      {
+        label: '(f) Client Rescheduling (Non-Weather)',
+        text: 'Client may reschedule training one (1) time without forfeiting their deposit, provided that (i) written notice is given at least seven (7) business days prior to the scheduled training date, and (ii) a $500 rescheduling fee is paid prior to confirming the new date. Any additional reschedule requests shall be treated as a cancellation.',
+      },
+      {
+        label: '(g) Weather-Related Rescheduling',
+        text: 'If field training cannot proceed due to weather conditions, Client may reschedule at no additional cost provided written notice is given at least forty-eight (48) hours prior to the scheduled start of training (8:00 AM local time on the first training day). Weather-related reschedules do not count toward the one-time reschedule allowance described in subsection (f).',
+      },
+      {
+        label: '(h) ReDry Rescheduling',
+        text: 'ReDry reserves the right to reschedule training at any time due to trainer illness, travel disruption, safety concerns, or other operational reasons, at no cost or penalty to Client. ReDry will make reasonable efforts to provide advance notice and to reschedule within thirty (30) days of the original date.',
+      },
+    ],
+  },
+  {
+    title: 'Unlimited MRI Package Subscription',
+    content: [
+      'Access to the full suite of scanning grids and MRI tools requires an active \u201cUnlimited MRI Package\u201d subscription.',
+      'If Client opts not to maintain the subscription, they must acknowledge limited access and scanning ability.',
+      'A 30-day complimentary trial is available for new trainees.',
+    ],
+  },
+  {
+    title: 'Safety Requirements and Liability Waiver',
+    subsections: [
+      {
+        label: '(a) Liability Waiver',
+        text: 'All participants must sign a waiver acknowledging the risks of rooftop training, including potential injury or death. ReDry is not liable for accidents or injuries except in cases of gross negligence.',
+      },
+      {
+        label: '(b) Participant Fitness and Conduct',
+        text: 'Participants confirm they are medically fit for rooftop activity. Trainers may exclude any individual who appears unfit or unsafe to participate.',
+      },
+      {
+        label: '(c) Required Personal Protective Equipment (PPE)',
+        text: 'Participants must wear appropriate PPE, including non-slip footwear. Fall protection gear must be used where required by OSHA, local law, or trainer instruction.',
+      },
+      {
+        label: '(d) On-Site Safety Procedures',
+        text: 'Client must provide a safe roof access method. ReDry may delay or cancel field activities due to unsafe conditions, including inclement weather.',
+      },
+      {
+        label: '(e) Age Requirement',
+        text: 'Participants must be 18 years of age or older.',
+      },
+    ],
+  },
+  {
+    title: 'Intellectual Property and Confidentiality',
+    content: [
+      'All training materials, methods, and the Roof MRI process are proprietary and patent-pending.',
+      'No reproduction, external teaching, sublicensing, or redistribution is allowed.',
+      'Materials must be handled as confidential and may not be recorded or shared without ReDry\u2019s written permission.',
+      'Unauthorized use may result in legal action and revocation of certification.',
+      'The confidentiality obligations set forth in this Section shall survive the expiration or termination of this Agreement and shall remain in effect indefinitely.',
+    ],
+    subsections: [
+      {
+        label: 'Irreparable Harm and Injunctive Relief',
+        text: 'Client acknowledges that any breach of this Section would cause irreparable harm to ReDry for which monetary damages alone would be inadequate. In the event of any actual or threatened breach, ReDry shall be entitled to seek immediate injunctive relief, specific performance, and any other equitable remedies available under law, without the necessity of posting bond or proving actual damages.',
+      },
+      {
+        label: 'Presumption of Liability',
+        text: 'Client agrees that ReDry\u2019s demonstration of a breach of any obligation under this Section shall constitute sufficient evidence of liability, and Client shall bear the burden of proving that no damages resulted from such breach. Client further agrees that ReDry shall be entitled to pursue all remedies to the fullest extent permitted by applicable law, including recovery of attorneys\u2019 fees, costs, and consequential damages arising from any such breach.',
+      },
+      {
+        label: 'Liquidated Damages',
+        text: 'Client acknowledges that the precise amount of damages resulting from a breach of this Section would be difficult or impossible to determine. Accordingly, in the event of a proven breach, Client agrees to pay liquidated damages in an amount equal to three (3) times the total fees paid under this Agreement, in addition to any other remedies available to ReDry. This liquidated damages provision reflects the parties\u2019 reasonable estimate of anticipated harm and shall not be construed as a penalty.',
+      },
+    ],
+  },
+  {
+    title: 'Liability, Indemnification, and Remedies',
+    subsections: [
+      {
+        label: '(a) Limitation of Liability',
+        text: 'To the maximum extent permitted by applicable law, ReDry\u2019s total aggregate liability arising out of or related to this Agreement, whether in contract, tort, or otherwise, shall not exceed the total fees actually paid by Client under this Agreement. In no event shall ReDry be liable for any indirect, incidental, special, consequential, or punitive damages, including but not limited to loss of revenue, loss of profits, or loss of business opportunity, regardless of whether such damages were foreseeable or whether ReDry was advised of the possibility thereof.',
+      },
+      {
+        label: '(b) Indemnification',
+        text: 'Client agrees to indemnify, defend, and hold harmless ReDry LLC, its officers, employees, trainers, and agents from and against any and all claims, damages, losses, liabilities, costs, and expenses (including reasonable attorneys\u2019 fees) arising out of or related to: (i) the condition, safety, or accessibility of any roofs or job sites provided by Client for training purposes; (ii) the acts, omissions, or negligence of Client\u2019s employees, agents, or trainees during or in connection with training activities; (iii) Client\u2019s misuse, misrepresentation, or unauthorized application of the Roof MRI certification, methodology, or materials; or (iv) any breach of this Agreement by Client.',
+      },
+    ],
+  },
+  {
+    title: 'General Terms',
+    subsections: [
+      {
+        label: '(a) Governing Law',
+        text: 'This Agreement will be governed by the laws of the state in which ReDry is headquartered, without regard to conflicts of law principles.',
+      },
+      {
+        label: '(b) Force Majeure',
+        text: 'Neither party shall be liable for any delay or failure to perform its obligations under this Agreement if such delay or failure results from circumstances beyond the party\u2019s reasonable control, including but not limited to: acts of God, natural disasters, severe weather, fire, flood, epidemic or pandemic, government actions or orders, civil unrest, war or terrorism, labor disputes, utility or telecommunications failures, travel disruptions, or trainer illness or medical emergency. The affected party shall provide prompt written notice and shall use reasonable efforts to mitigate the impact and resume performance as soon as practicable. If a force majeure event continues for more than sixty (60) days, either party may terminate this Agreement upon written notice, and Client shall be entitled to a pro-rata refund of fees paid for services not yet rendered, less any non-refundable deposits.',
+      },
+      {
+        label: '(c) Entire Agreement',
+        text: 'This document represents the full understanding between the parties and supersedes all prior agreements regarding training.',
+      },
+      {
+        label: '(d) Amendments',
+        text: 'This Agreement may be modified only in writing signed by both parties.',
+      },
+      {
+        label: '(e) Survival',
+        text: 'Sections 2 (Certification), 7 (Intellectual Property and Confidentiality), and 8 (Liability, Indemnification, and Remedies) shall survive the expiration or termination of this Agreement.',
+      },
+    ],
+  },
+  {
+    title: 'Acknowledgment and Execution',
+    content: [
+      'By signing below, the undersigned certifies that they are authorized to enter into this Agreement on behalf of the Client and to enroll the listed individuals in the Roof MRI Certification Training.',
+    ],
+  },
+];
+
+const TIER_NAMES = { professional: 'Professional', regional: 'Regional', enterprise: 'Enterprise' };
+const TIER_BASE_INFO = {
+  professional: { trainees: 3, kits: 1, days: '1 Day' },
+  regional: { trainees: 10, kits: 2, days: '2 Days' },
+  enterprise: { trainees: 25, kits: 4, days: '4 Days' },
+};
+
+function buildContractPdf(proposal) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'LETTER', margins: { top: 50, bottom: 50, left: 55, right: 55 } });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    const navy = '#1B2A4A';
+    const green = '#00bd70';
+    const gray = '#64748b';
+    const lightBg = '#f8fafc';
+    const borderGray = '#e2e8f0';
+    const pageW = doc.page.width - 110; // usable width
+    const leftM = 55;
+
+    const tierKey = proposal.selected_tier || proposal.tier || 'professional';
+    const tierName = TIER_NAMES[tierKey] || tierKey;
+    const tierInfo = TIER_BASE_INFO[tierKey] || TIER_BASE_INFO.professional;
+    const totalPrice = Number(proposal.total_price) || 0;
+    const signedDate = proposal.signed_at
+      ? new Date(proposal.signed_at).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+      : new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+
+    function fmt(n) { return '$' + Number(n).toLocaleString('en-US'); }
+
+    function checkPage(needed) {
+      if (doc.y + needed > doc.page.height - 60) {
+        doc.addPage();
+      }
+    }
+
+    // ── Page 1: Header ──
+    doc.rect(0, 0, doc.page.width, 70).fill(navy);
+    doc.fontSize(22).fill('#ffffff').text('ROOF ', leftM, 24, { continued: true })
+       .fill(green).text('MRI', { continued: false });
+    doc.fontSize(9).fill('#94a3b8').text('TRAINING & CERTIFICATION AGREEMENT', leftM, 50);
+
+    doc.moveDown(2);
+
+    // ── Agreement intro ──
+    doc.fontSize(16).fill(navy).text('Training Agreement', leftM, doc.y);
+    doc.moveDown(0.5);
+    doc.fontSize(9.5).fill('#374151').text(
+      `This Training Agreement (\u201CAgreement\u201D) is entered into by and between ReDry LLC (\u201CReDry\u201D) and ${proposal.company} (\u201CClient\u201D), effective as of ${signedDate} (\u201CEffective Date\u201D), and governs the participation of the Client and its individual trainees in the Roof MRI Certification Training Program provided by ReDry.`,
+      leftM, doc.y, { width: pageW, lineGap: 2 }
+    );
+    doc.moveDown(1);
+
+    // ── Package Summary Box ──
+    checkPage(140);
+    const boxY = doc.y;
+    doc.rect(leftM, boxY, pageW, 24).fill(navy);
+    doc.fontSize(11).fill('#ffffff').text('SELECTED PACKAGE', leftM + 12, boxY + 7);
+
+    let detailY = boxY + 24;
+    doc.rect(leftM, detailY, pageW, 100).fill(lightBg).stroke(borderGray);
+
+    const col1X = leftM + 12;
+    const col2X = leftM + pageW / 2 + 12;
+
+    detailY += 10;
+    doc.fontSize(9).fill(gray).text('Package:', col1X, detailY);
+    doc.fontSize(9).fill(navy).text(`${tierName}`, col1X + 70, detailY);
+
+    detailY += 16;
+    doc.fontSize(9).fill(gray).text('Company:', col1X, detailY);
+    doc.fontSize(9).fill(navy).text(proposal.company, col1X + 70, detailY);
+    doc.fontSize(9).fill(gray).text('Contact:', col2X, detailY);
+    doc.fontSize(9).fill(navy).text(proposal.contact_name, col2X + 70, detailY);
+
+    detailY += 16;
+    doc.fontSize(9).fill(gray).text('Trainees:', col1X, detailY);
+    const totalTrainees = tierInfo.trainees + (proposal.extra_trainees || 0);
+    doc.fontSize(9).fill(navy).text(`${totalTrainees} (${tierInfo.trainees} base${proposal.extra_trainees > 0 ? ` + ${proposal.extra_trainees} additional` : ''})`, col1X + 70, detailY);
+    doc.fontSize(9).fill(gray).text('Recon Kits:', col2X, detailY);
+    const totalKits = tierInfo.kits + (proposal.extra_kits || 0);
+    doc.fontSize(9).fill(navy).text(`${totalKits} (${tierInfo.kits} base${proposal.extra_kits > 0 ? ` + ${proposal.extra_kits} additional` : ''})`, col2X + 70, detailY);
+
+    detailY += 16;
+    doc.fontSize(9).fill(gray).text('Duration:', col1X, detailY);
+    doc.fontSize(9).fill(navy).text(tierInfo.days, col1X + 70, detailY);
+    if (proposal.tracks && proposal.tracks.length > 0) {
+      doc.fontSize(9).fill(gray).text('Tracks:', col2X, detailY);
+      doc.fontSize(9).fill(navy).text(proposal.tracks.join(', '), col2X + 70, detailY);
+    }
+
+    detailY += 16;
+    doc.fontSize(9).fill(gray).text('Total Price:', col1X, detailY);
+    doc.fontSize(10).fill(navy).font('Helvetica-Bold').text(fmt(totalPrice), col1X + 70, detailY);
+    doc.font('Helvetica');
+
+    doc.y = boxY + 134;
+    doc.moveDown(1);
+
+    // ── Terms & Conditions ──
+    doc.fontSize(13).fill(navy).text('Terms & Conditions', leftM, doc.y);
+    doc.moveDown(0.5);
+
+    TERMS_SECTIONS.forEach((section, idx) => {
+      checkPage(40);
+      doc.fontSize(10).fill(navy).text(`${idx + 1}. ${section.title}`, leftM, doc.y, { width: pageW });
+      doc.moveDown(0.3);
+
+      if (section.content) {
+        section.content.forEach(p => {
+          checkPage(30);
+          doc.fontSize(8.5).fill('#374151').text(p, leftM + 14, doc.y, { width: pageW - 14, lineGap: 1.5 });
+          doc.moveDown(0.2);
+        });
+      }
+
+      if (section.subsections) {
+        section.subsections.forEach(sub => {
+          checkPage(30);
+          doc.fontSize(8.5).fill(navy).text(sub.label, leftM + 14, doc.y, { width: pageW - 14 });
+          doc.moveDown(0.1);
+          doc.fontSize(8.5).fill('#374151').text(sub.text, leftM + 14, doc.y, { width: pageW - 14, lineGap: 1.5 });
+          doc.moveDown(0.2);
+        });
+      }
+
+      doc.moveDown(0.4);
+    });
+
+    // ── Signature Block ──
+    checkPage(120);
+    doc.moveDown(0.5);
+    const sigBlockY = doc.y;
+    doc.rect(leftM, sigBlockY, pageW, 24).fill(navy);
+    doc.fontSize(11).fill('#ffffff').text('EXECUTION', leftM + 12, sigBlockY + 7);
+
+    let sigY = sigBlockY + 34;
+    doc.fontSize(9).fill(gray).text('Signed by:', leftM, sigY);
+    doc.fontSize(10).fill(navy).text(proposal.signature_name || 'N/A', leftM + 70, sigY);
+
+    sigY += 18;
+    doc.fontSize(9).fill(gray).text('Company:', leftM, sigY);
+    doc.fontSize(10).fill(navy).text(proposal.company, leftM + 70, sigY);
+
+    sigY += 18;
+    doc.fontSize(9).fill(gray).text('Date:', leftM, sigY);
+    doc.fontSize(10).fill(navy).text(signedDate, leftM + 70, sigY);
+
+    // Render the actual signature image if available
+    sigY += 24;
+    if (proposal.signature_data) {
+      try {
+        // signature_data is a base64 data URL from the canvas
+        const sigImgData = proposal.signature_data.replace(/^data:image\/\w+;base64,/, '');
+        const sigBuffer = Buffer.from(sigImgData, 'base64');
+        doc.image(sigBuffer, leftM, sigY, { width: 200, height: 60 });
+        sigY += 65;
+      } catch (sigErr) {
+        // If signature image fails, show a line instead
+        doc.moveTo(leftM, sigY + 30).lineTo(leftM + 200, sigY + 30).lineWidth(0.5).stroke(borderGray);
+        sigY += 40;
+      }
+    } else {
+      doc.moveTo(leftM, sigY + 30).lineTo(leftM + 200, sigY + 30).lineWidth(0.5).stroke(borderGray);
+      sigY += 40;
+    }
+
+    // ── Footer ──
+    doc.fontSize(8).fill(gray).text(
+      'Roof MRI | Advancing the Science of Roof Moisture Detection | roof-mri.com',
+      leftM, doc.page.height - 40, { width: pageW, align: 'center' }
+    );
+
+    doc.end();
+  });
+}
+
 // ── Helpers ──────────────────────────────────────────────────────
-function stripHtml(str) {
+function escapeHtml(str) {
   if (typeof str !== 'string') return str;
-  return str.replace(/[<>]/g, '');
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function isValidEmail(email) {
@@ -642,7 +1125,7 @@ app.post('/api/admin/setup', loginLimiter, async (req, res) => {
     const token = jwt.sign(
       { sub: created[0].id, email: created[0].email },
       process.env.JWT_SECRET,
-      { expiresIn: '24h' }
+      { expiresIn: '90d' }
     );
 
     res.json({ success: true, token, message: 'Admin account created' });
@@ -687,7 +1170,7 @@ app.post('/api/admin/login', loginLimiter, async (req, res) => {
     const token = jwt.sign(
       { sub: user.id, email: user.email },
       process.env.JWT_SECRET,
-      { expiresIn: '24h' }
+      { expiresIn: '90d' }
     );
 
     res.json({ success: true, token });
@@ -736,11 +1219,11 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
     }
 
     // Sanitize user-supplied text to prevent HTML injection in emails
-    data.contactName = stripHtml(data.contactName);
-    data.company = stripHtml(data.company);
-    data.email = stripHtml(data.email);
+    data.contactName = escapeHtml(data.contactName);
+    data.company = escapeHtml(data.company);
+    data.email = escapeHtml(data.email);
     if (Array.isArray(data.tracks)) {
-      data.tracks = data.tracks.map(t => stripHtml(t));
+      data.tracks = data.tracks.map(t => escapeHtml(t));
     }
 
     // Generate unique proposal ID and store in DB
@@ -769,7 +1252,7 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
 
     const emailMsg = {
       to: data.email,
-      from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
+      from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
       replyTo: { email: 'adam@re-dry.com', name: 'Adam Capps' },
       subject: `Roof MRI Training Proposal for ${data.company}`,
       html,
@@ -785,7 +1268,7 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
     // Internal notification
     await sgMail.send({
       to: 'adam@re-dry.com',
-      from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
+      from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
       subject: `Proposal Sent: ${data.company} - ${data.contactName}`,
       html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
         <div style="background:#1B2A4A;padding:16px 20px;text-align:center">
@@ -842,7 +1325,7 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Signature data too large' });
     }
 
-    const safeSignatureName = stripHtml(signatureName);
+    const safeSignatureName = escapeHtml(signatureName);
 
     // Atomic update: prevents race condition where two concurrent sign requests
     // both pass a status check before either writes
@@ -859,13 +1342,60 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
       return res.status(409).json({ error: 'This proposal has already been signed' });
     }
 
-    // Notify Adam that a proposal was signed
+    // Generate signed contract PDF
     const p = updated[0];
-    const safeName = stripHtml(p.contact_name);
-    const safeCompany = stripHtml(p.company);
+    const safeName = escapeHtml(p.contact_name);
+    const safeCompany = escapeHtml(p.company);
+    let contractPdfBuffer;
+    try {
+      contractPdfBuffer = await buildContractPdf(p);
+    } catch (pdfErr) {
+      console.error('Contract PDF generation failed:', pdfErr);
+      // Continue without PDF – signing still succeeded
+    }
+
+    const pdfAttachment = contractPdfBuffer ? [{
+      content: contractPdfBuffer.toString('base64'),
+      filename: `Roof-MRI-Contract-${safeCompany.replace(/[^a-zA-Z0-9]/g, '-')}.pdf`,
+      type: 'application/pdf',
+      disposition: 'attachment',
+    }] : [];
+
+    // Send contract PDF to client
+    try {
+      await sgMail.send({
+        to: p.email,
+        from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
+        subject: `Your Signed Agreement - Roof MRI Training`,
+        html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
+          <div style="background:#1B2A4A;padding:16px 20px;text-align:center">
+            <span style="color:#fff;font-size:18px;font-weight:700">ROOF <span style="color:#00bd70">MRI</span></span>
+          </div>
+          <div style="padding:24px;background:#fff;border:1px solid #e2e8f0">
+            <p style="font-size:15px;color:#374151;margin-bottom:16px">Hi ${safeName},</p>
+            <p style="font-size:14px;color:#374151;line-height:1.6;margin-bottom:16px">Thank you for signing your Roof MRI Training Agreement! Your signed contract is attached to this email for your records.</p>
+            <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:16px;margin-bottom:16px">
+              <p style="font-size:13px;color:#64748b;margin:0 0 4px 0">Package: <strong style="color:#1B2A4A">${p.tier ? p.tier.charAt(0).toUpperCase() + p.tier.slice(1) : 'Custom'}</strong></p>
+              <p style="font-size:13px;color:#64748b;margin:0 0 4px 0">Company: <strong style="color:#1B2A4A">${safeCompany}</strong></p>
+              <p style="font-size:13px;color:#64748b;margin:0">Total: <strong style="color:#1B2A4A">${p.total_price ? '$' + Number(p.total_price).toLocaleString() : 'TBD'}</strong></p>
+            </div>
+            <p style="font-size:14px;color:#374151;line-height:1.6;margin-bottom:12px">Next step: complete your payment to lock in your training dates. You can pay directly from your proposal page.</p>
+            <p style="font-size:14px;color:#374151;line-height:1.6">Questions? Reply to this email or reach out to adam@re-dry.com.</p>
+          </div>
+          <div style="background:#1B2A4A;padding:12px 20px;text-align:center">
+            <p style="margin:0;font-size:11px;color:#94a3b8">Roof MRI | Advancing the Science of Roof Moisture Detection</p>
+          </div>
+        </div>`,
+        attachments: pdfAttachment,
+      });
+    } catch (clientEmailErr) {
+      console.error('Failed to send contract to client:', clientEmailErr);
+    }
+
+    // Notify Adam that a proposal was signed (with contract attached)
     await sgMail.send({
       to: 'adam@re-dry.com',
-      from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
+      from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
       subject: `SIGNED: ${safeCompany} - ${safeName}`,
       html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
         <div style="background:#00bd70;padding:16px 20px;text-align:center">
@@ -876,7 +1406,8 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
           <p style="font-size:13px;color:#64748b">${p.tier ? p.tier.charAt(0).toUpperCase() + p.tier.slice(1) : 'Client Choice'} | ${p.total_price ? '$' + Number(p.total_price).toLocaleString() : 'TBD'}</p>
           <p style="font-size:13px;color:#64748b">Signed by: ${safeSignatureName}</p>
         </div>
-      </div>`
+      </div>`,
+      attachments: pdfAttachment,
     });
 
     res.json({ success: true, message: 'Proposal signed' });
@@ -996,28 +1527,51 @@ app.post('/api/proposals/:id/configure', proposalViewLimiter, async (req, res) =
 // Create a Stripe Checkout session so the client can pay after signing
 app.post('/api/proposals/:id/checkout', checkoutLimiter, async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
-    if (rows.length === 0) return res.status(404).json({ error: 'Proposal not found' });
+    // Atomic check: only proceed if payment_status is 'unpaid' and status is 'signed'
+    const { rows } = await pool.query(
+      `UPDATE proposals SET payment_status = 'checkout_pending'
+       WHERE id = $1 AND status = 'signed' AND payment_status = 'unpaid'
+       RETURNING *`,
+      [req.params.id]
+    );
+
+    if (rows.length === 0) {
+      // Figure out why the atomic update failed so we can return the right error
+      const { rows: check } = await pool.query('SELECT status, payment_status, total_price FROM proposals WHERE id = $1', [req.params.id]);
+      if (check.length === 0) return res.status(404).json({ error: 'Proposal not found' });
+      if (check[0].status !== 'signed') return res.status(400).json({ error: 'Proposal must be signed before payment' });
+      if (check[0].payment_status === 'paid') return res.status(409).json({ error: 'This proposal has already been paid' });
+      if (check[0].payment_status === 'processing') return res.status(409).json({ error: 'A bank transfer is currently being processed. Please wait for it to clear.' });
+      return res.status(409).json({ error: 'A checkout session is already in progress' });
+    }
 
     const proposal = rows[0];
-    if (proposal.status !== 'signed') {
-      return res.status(400).json({ error: 'Proposal must be signed before payment' });
-    }
-    if (proposal.payment_status === 'paid') {
-      return res.status(409).json({ error: 'This proposal has already been paid' });
-    }
     if (!proposal.total_price || Number(proposal.total_price) <= 0) {
+      // Revert the status since we can't proceed
+      await pool.query(`UPDATE proposals SET payment_status = 'unpaid' WHERE id = $1`, [req.params.id]);
       return res.status(400).json({ error: 'No price set for this proposal' });
+    }
+
+    // Enterprise tier requires a phone consultation – no online checkout
+    const proposalTier = proposal.selected_tier || proposal.tier;
+    if (proposalTier === 'enterprise') {
+      await pool.query(`UPDATE proposals SET payment_status = 'unpaid' WHERE id = $1`, [req.params.id]);
+      return res.status(400).json({ error: 'Enterprise packages require a consultation call. Please contact adam@re-dry.com or call to finalize payment.' });
     }
 
     const baseUrl = process.env.PROPOSAL_BASE_URL || 'https://proposals.roof-mri.com';
     const session = await stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
+      payment_method_types: ['card', 'us_bank_account'],
+      payment_method_options: {
+        us_bank_account: {
+          financial_connections: { permissions: ['payment_method'] },
+        },
+      },
       line_items: [{
         price_data: {
           currency: 'usd',
           product_data: {
-            name: `Roof MRI Training – ${proposal.tier ? proposal.tier.charAt(0).toUpperCase() + proposal.tier.slice(1) : 'Custom'} Package`,
+            name: `Roof MRI Training \u2013 ${proposal.tier ? proposal.tier.charAt(0).toUpperCase() + proposal.tier.slice(1) : 'Custom'} Package`,
             description: `Training proposal for ${proposal.company}`,
           },
           unit_amount: Math.round(Number(proposal.total_price) * 100), // Stripe uses cents
@@ -1031,9 +1585,21 @@ app.post('/api/proposals/:id/checkout', checkoutLimiter, async (req, res) => {
       cancel_url: `${baseUrl}/p/${proposal.id}?payment=cancelled`,
     });
 
+    // Store session ID and revert to unpaid (Stripe webhook will set to 'paid')
+    await pool.query(
+      `UPDATE proposals SET payment_status = 'unpaid', stripe_session_id = $1 WHERE id = $2`,
+      [session.id, proposal.id]
+    );
+
     res.json({ checkoutUrl: session.url });
   } catch (err) {
     console.error('Stripe checkout error:', err);
+    // Revert to unpaid so the client can retry
+    try {
+      await pool.query(`UPDATE proposals SET payment_status = 'unpaid' WHERE id = $1 AND payment_status = 'checkout_pending'`, [req.params.id]);
+    } catch (revertErr) {
+      console.error('Failed to revert checkout_pending status:', revertErr);
+    }
     res.status(500).json({ error: 'Failed to create checkout session' });
   }
 });
@@ -1084,8 +1650,19 @@ app.get('/health', async (req, res) => {
 });
 
 // ── Start ──────────────────────────────────────────────────────────
+// ── Validate required environment variables at startup ──────────
+function validateEnv() {
+  const required = ['DATABASE_URL', 'SENDGRID_API_KEY', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'JWT_SECRET'];
+  const missing = required.filter(key => !process.env[key]);
+  if (missing.length > 0) {
+    console.error(`FATAL: Missing required environment variables: ${missing.join(', ')}`);
+    process.exit(1);
+  }
+}
+
 const PORT = process.env.PORT || 3001;
 let server;
+validateEnv();
 initDB().then(() => {
   server = app.listen(PORT, () => console.log(`Roof MRI backend on port ${PORT}`));
 }).catch(err => {

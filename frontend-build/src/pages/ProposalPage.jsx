@@ -237,11 +237,16 @@ export default function ProposalPage() {
   const isConfigured = !!(proposal.tier || proposal.selected_tier)
   const isSigned = proposal.status === 'signed'
   const isPaid = proposal.payment_status === 'paid'
+  const isProcessing = proposal.payment_status === 'processing'
+  const paymentFailed = proposal.payment_status === 'failed'
   const hasPrice = proposal.total_price != null && Number(proposal.total_price) > 0
   const needsConfiguration = proposal.let_client_choose && !isConfigured
   const proposalDate = proposal.created_at
     ? new Date(proposal.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
     : new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+
+  const activeTier = proposal.selected_tier || proposal.tier
+  const isEnterprise = activeTier === 'enterprise'
 
   const tierPrices = {
     professional: proposal.professional_price,
@@ -426,6 +431,44 @@ export default function ProposalPage() {
         </div>
       )}
 
+      {/* ACH payment processing */}
+      {isProcessing && !isPaid && (
+        <div style={{ textAlign: 'center', padding: '60px 0' }}>
+          <div className="signed-badge visible" style={{ display: 'inline-flex', marginBottom: 16 }}>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+            </svg>
+            <div>
+              <div className="signed-text" style={{ fontSize: '1.1rem' }}>Bank Transfer Processing</div>
+              <div className="signed-detail">Your ACH payment is being processed. This typically takes 2{'\u2013'}3 business days.</div>
+            </div>
+          </div>
+          <p style={{ color: '#5a6377', fontSize: '0.9rem' }}>You{'\u2019'}ll receive a confirmation email once the payment clears.</p>
+        </div>
+      )}
+
+      {/* ACH payment failed */}
+      {paymentFailed && (
+        <div style={{ textAlign: 'center', padding: '60px 0' }}>
+          <div className="signed-badge visible" style={{ display: 'inline-flex', marginBottom: 16 }}>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" />
+            </svg>
+            <div>
+              <div className="signed-text" style={{ fontSize: '1.1rem', color: '#dc2626' }}>Payment Failed</div>
+              <div className="signed-detail">Your bank transfer could not be completed. Please try again or use a different payment method.</div>
+            </div>
+          </div>
+          {hasPrice && (
+            <div style={{ marginTop: 12 }}>
+              <button className="cta-btn" onClick={handlePayNow} type="button" style={{ fontSize: '1rem' }}>
+                Retry Payment {'\u2014'} {fmt(proposal.total_price)}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Checking payment after Stripe redirect */}
       {checkingPayment && !isPaid && (
         <div style={{ textAlign: 'center', padding: '60px 0' }}>
@@ -451,7 +494,7 @@ export default function ProposalPage() {
               </div>
             </div>
           </div>
-          {hasPrice && (
+          {hasPrice && !isEnterprise && (
             <>
               {signError && (
                 <p style={{ color: '#dc2626', fontSize: 13, marginBottom: 12 }}>{signError}</p>
@@ -461,10 +504,24 @@ export default function ProposalPage() {
                   Pay Now {'\u2014'} {fmt(proposal.total_price)}
                 </button>
                 <p style={{ color: '#9ba3b5', fontSize: 12, marginTop: 10 }}>
-                  Secure payment powered by Stripe
+                  Secure payment via card or bank transfer, powered by Stripe
                 </p>
               </div>
             </>
+          )}
+          {isEnterprise && (
+            <div style={{ marginTop: 20 }}>
+              <p style={{ color: '#1e2c55', fontSize: '1rem', fontWeight: 600, marginBottom: 8 }}>
+                Next Step: Schedule Your Consultation Call
+              </p>
+              <p style={{ color: '#5a6377', fontSize: '0.9rem', lineHeight: 1.6, maxWidth: 440, margin: '0 auto' }}>
+                Enterprise engagements are finalized through a consultation call. Please reach out to get your training scheduled and payment arranged.
+              </p>
+              <a href="mailto:adam@re-dry.com?subject=Enterprise%20Training%20-%20Ready%20to%20Schedule" style={{ display: 'inline-block', marginTop: 16, padding: '12px 28px', background: '#1B2A4A', color: '#fff', borderRadius: 8, textDecoration: 'none', fontSize: '0.95rem', fontWeight: 600 }}>
+                Contact Adam Capps
+              </a>
+              <p style={{ color: '#9ba3b5', fontSize: 12, marginTop: 10 }}>adam@re-dry.com</p>
+            </div>
           )}
         </div>
       )}
