@@ -1083,7 +1083,7 @@ app.post('/api/admin/setup', loginLimiter, async (req, res) => {
     const token = jwt.sign(
       { sub: created[0].id, email: created[0].email },
       process.env.JWT_SECRET,
-      { expiresIn: '24h' }
+      { expiresIn: '90d' }
     );
 
     res.json({ success: true, token, message: 'Admin account created' });
@@ -1128,7 +1128,7 @@ app.post('/api/admin/login', loginLimiter, async (req, res) => {
     const token = jwt.sign(
       { sub: user.id, email: user.email },
       process.env.JWT_SECRET,
-      { expiresIn: '24h' }
+      { expiresIn: '90d' }
     );
 
     res.json({ success: true, token });
