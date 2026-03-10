@@ -42,6 +42,21 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
+  // ── Idempotency: skip already-processed events ──────────────────
+  try {
+    const { rowCount } = await pool.query(
+      `INSERT INTO webhook_events (stripe_event_id) VALUES ($1) ON CONFLICT DO NOTHING`,
+      [event.id]
+    );
+    if (rowCount === 0) {
+      // Already processed this event – return 200 so Stripe stops retrying
+      return res.json({ received: true, duplicate: true });
+    }
+  } catch (idempotencyErr) {
+    console.error('Webhook idempotency check failed:', idempotencyErr);
+    // Continue processing – better to risk a duplicate than drop the event
+  }
+
   // Handle both immediate (card) and async (ACH bank transfer) payments
   const paymentEvents = ['checkout.session.completed', 'checkout.session.async_payment_succeeded'];
   if (paymentEvents.includes(event.type)) {
@@ -73,12 +88,13 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
         const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [proposalId]);
         if (rows.length > 0) {
           const p = rows[0];
-          const safeName = stripHtml(p.contact_name);
-          const safeCompany = stripHtml(p.company);
+          const safeName = escapeHtml(p.contact_name);
+          const safeCompany = escapeHtml(p.company);
           const totalFormatted = p.total_price ? '$' + Number(p.total_price).toLocaleString() : 'N/A';
           const tierLabel = p.tier ? p.tier.charAt(0).toUpperCase() + p.tier.slice(1) : 'Custom';
 
           // Notify Adam of payment
+          let emailSent = false;
           await sgMail.send({
             to: 'adam@re-dry.com',
             from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
@@ -131,9 +147,13 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
                 </div>
               </div>`
             });
+            emailSent = true;
           } catch (clientEmailErr) {
             console.error('Failed to send payment confirmation to client:', clientEmailErr);
           }
+
+          // Track whether confirmation emails were sent
+          await pool.query('UPDATE proposals SET email_sent = $1 WHERE id = $2', [emailSent, proposalId]);
         }
       } catch (webhookErr) {
         console.error('Webhook processing error:', webhookErr);
@@ -271,12 +291,29 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+
+  // Webhook idempotency table – prevents duplicate processing of Stripe events
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS webhook_events (
+      stripe_event_id TEXT PRIMARY KEY,
+      processed_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+
+  // Track whether confirmation emails were sent successfully
+  await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS email_sent BOOLEAN DEFAULT false`);
+
+  // Indexes for common queries
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_proposals_created_at ON proposals(created_at DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_proposals_payment_status ON proposals(payment_status)`);
+
   console.log('Database initialized');
 }
 
 // ── Generate short unique ID ───────────────────────────────────────
 function generateId() {
-  return crypto.randomBytes(6).toString('base64url');
+  return crypto.randomBytes(16).toString('base64url');
 }
 
 // ── Build branded HTML email ───────────────────────────────────────
@@ -1029,9 +1066,14 @@ function buildContractPdf(proposal) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
-function stripHtml(str) {
+function escapeHtml(str) {
   if (typeof str !== 'string') return str;
-  return str.replace(/[<>]/g, '');
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function isValidEmail(email) {
@@ -1177,11 +1219,11 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
     }
 
     // Sanitize user-supplied text to prevent HTML injection in emails
-    data.contactName = stripHtml(data.contactName);
-    data.company = stripHtml(data.company);
-    data.email = stripHtml(data.email);
+    data.contactName = escapeHtml(data.contactName);
+    data.company = escapeHtml(data.company);
+    data.email = escapeHtml(data.email);
     if (Array.isArray(data.tracks)) {
-      data.tracks = data.tracks.map(t => stripHtml(t));
+      data.tracks = data.tracks.map(t => escapeHtml(t));
     }
 
     // Generate unique proposal ID and store in DB
@@ -1283,7 +1325,7 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Signature data too large' });
     }
 
-    const safeSignatureName = stripHtml(signatureName);
+    const safeSignatureName = escapeHtml(signatureName);
 
     // Atomic update: prevents race condition where two concurrent sign requests
     // both pass a status check before either writes
@@ -1302,8 +1344,8 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
 
     // Generate signed contract PDF
     const p = updated[0];
-    const safeName = stripHtml(p.contact_name);
-    const safeCompany = stripHtml(p.company);
+    const safeName = escapeHtml(p.contact_name);
+    const safeCompany = escapeHtml(p.company);
     let contractPdfBuffer;
     try {
       contractPdfBuffer = await buildContractPdf(p);
@@ -1485,26 +1527,35 @@ app.post('/api/proposals/:id/configure', proposalViewLimiter, async (req, res) =
 // Create a Stripe Checkout session so the client can pay after signing
 app.post('/api/proposals/:id/checkout', checkoutLimiter, async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
-    if (rows.length === 0) return res.status(404).json({ error: 'Proposal not found' });
+    // Atomic check: only proceed if payment_status is 'unpaid' and status is 'signed'
+    const { rows } = await pool.query(
+      `UPDATE proposals SET payment_status = 'checkout_pending'
+       WHERE id = $1 AND status = 'signed' AND payment_status = 'unpaid'
+       RETURNING *`,
+      [req.params.id]
+    );
+
+    if (rows.length === 0) {
+      // Figure out why the atomic update failed so we can return the right error
+      const { rows: check } = await pool.query('SELECT status, payment_status, total_price FROM proposals WHERE id = $1', [req.params.id]);
+      if (check.length === 0) return res.status(404).json({ error: 'Proposal not found' });
+      if (check[0].status !== 'signed') return res.status(400).json({ error: 'Proposal must be signed before payment' });
+      if (check[0].payment_status === 'paid') return res.status(409).json({ error: 'This proposal has already been paid' });
+      if (check[0].payment_status === 'processing') return res.status(409).json({ error: 'A bank transfer is currently being processed. Please wait for it to clear.' });
+      return res.status(409).json({ error: 'A checkout session is already in progress' });
+    }
 
     const proposal = rows[0];
-    if (proposal.status !== 'signed') {
-      return res.status(400).json({ error: 'Proposal must be signed before payment' });
-    }
-    if (proposal.payment_status === 'paid') {
-      return res.status(409).json({ error: 'This proposal has already been paid' });
-    }
-    if (proposal.payment_status === 'processing') {
-      return res.status(409).json({ error: 'A bank transfer is currently being processed. Please wait for it to clear.' });
-    }
     if (!proposal.total_price || Number(proposal.total_price) <= 0) {
+      // Revert the status since we can't proceed
+      await pool.query(`UPDATE proposals SET payment_status = 'unpaid' WHERE id = $1`, [req.params.id]);
       return res.status(400).json({ error: 'No price set for this proposal' });
     }
 
     // Enterprise tier requires a phone consultation – no online checkout
     const proposalTier = proposal.selected_tier || proposal.tier;
     if (proposalTier === 'enterprise') {
+      await pool.query(`UPDATE proposals SET payment_status = 'unpaid' WHERE id = $1`, [req.params.id]);
       return res.status(400).json({ error: 'Enterprise packages require a consultation call. Please contact adam@re-dry.com or call to finalize payment.' });
     }
 
@@ -1534,9 +1585,21 @@ app.post('/api/proposals/:id/checkout', checkoutLimiter, async (req, res) => {
       cancel_url: `${baseUrl}/p/${proposal.id}?payment=cancelled`,
     });
 
+    // Store session ID and revert to unpaid (Stripe webhook will set to 'paid')
+    await pool.query(
+      `UPDATE proposals SET payment_status = 'unpaid', stripe_session_id = $1 WHERE id = $2`,
+      [session.id, proposal.id]
+    );
+
     res.json({ checkoutUrl: session.url });
   } catch (err) {
     console.error('Stripe checkout error:', err);
+    // Revert to unpaid so the client can retry
+    try {
+      await pool.query(`UPDATE proposals SET payment_status = 'unpaid' WHERE id = $1 AND payment_status = 'checkout_pending'`, [req.params.id]);
+    } catch (revertErr) {
+      console.error('Failed to revert checkout_pending status:', revertErr);
+    }
     res.status(500).json({ error: 'Failed to create checkout session' });
   }
 });
@@ -1587,8 +1650,19 @@ app.get('/health', async (req, res) => {
 });
 
 // ── Start ──────────────────────────────────────────────────────────
+// ── Validate required environment variables at startup ──────────
+function validateEnv() {
+  const required = ['DATABASE_URL', 'SENDGRID_API_KEY', 'STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'JWT_SECRET'];
+  const missing = required.filter(key => !process.env[key]);
+  if (missing.length > 0) {
+    console.error(`FATAL: Missing required environment variables: ${missing.join(', ')}`);
+    process.exit(1);
+  }
+}
+
 const PORT = process.env.PORT || 3001;
 let server;
+validateEnv();
 initDB().then(() => {
   server = app.listen(PORT, () => console.log(`Roof MRI backend on port ${PORT}`));
 }).catch(err => {
