@@ -81,7 +81,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
           // Notify Adam of payment
           await sgMail.send({
             to: 'adam@re-dry.com',
-            from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
+            from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
             subject: `PAID: ${safeCompany} - ${safeName}`,
             html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
               <div style="background:#1B2A4A;padding:16px 20px;text-align:center">
@@ -98,7 +98,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
           try {
             await sgMail.send({
               to: p.email,
-              from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
+              from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
               subject: `Payment Confirmed - Roof MRI Training`,
               html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
                 <div style="background:#1B2A4A;padding:16px 20px;text-align:center">
@@ -1210,7 +1210,7 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
 
     const emailMsg = {
       to: data.email,
-      from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
+      from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
       replyTo: { email: 'adam@re-dry.com', name: 'Adam Capps' },
       subject: `Roof MRI Training Proposal for ${data.company}`,
       html,
@@ -1226,7 +1226,7 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
     // Internal notification
     await sgMail.send({
       to: 'adam@re-dry.com',
-      from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
+      from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
       subject: `Proposal Sent: ${data.company} - ${data.contactName}`,
       html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
         <div style="background:#1B2A4A;padding:16px 20px;text-align:center">
@@ -1323,7 +1323,7 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
     try {
       await sgMail.send({
         to: p.email,
-        from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
+        from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
         subject: `Your Signed Agreement - Roof MRI Training`,
         html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
           <div style="background:#1B2A4A;padding:16px 20px;text-align:center">
@@ -1353,7 +1353,7 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
     // Notify Adam that a proposal was signed (with contract attached)
     await sgMail.send({
       to: 'adam@re-dry.com',
-      from: { email: 'proposals@roof-mri.com', name: 'Roof MRI' },
+      from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
       subject: `SIGNED: ${safeCompany} - ${safeName}`,
       html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
         <div style="background:#00bd70;padding:16px 20px;text-align:center">
