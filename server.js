@@ -10,6 +10,7 @@ const jwt = require('jsonwebtoken');
 
 const PDFDocument = require('pdfkit');
 const path = require('path');
+const fs = require('fs');
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -181,7 +182,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
   res.json({ received: true });
 });
 
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '10mb' }));
 
 // ── Admin auth middleware ────────────────────────────────────────
 function requireAdmin(req, res, next) {
@@ -307,6 +308,18 @@ async function initDB() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_proposals_created_at ON proposals(created_at DESC)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_proposals_payment_status ON proposals(payment_status)`);
+
+  // ── Warranty management tables ──────────────────────────────────
+  const migrationPath = path.join(__dirname, 'migrations', '001_warranty_redesign.sql');
+  if (fs.existsSync(migrationPath)) {
+    const migrationSql = fs.readFileSync(migrationPath, 'utf8');
+    // Split on semicolons and run each statement
+    const statements = migrationSql.split(';').map(s => s.trim()).filter(s => s.length > 0 && !s.startsWith('--'));
+    for (const stmt of statements) {
+      await pool.query(stmt);
+    }
+    console.log('Warranty migration applied');
+  }
 
   console.log('Database initialized');
 }
@@ -1635,6 +1648,720 @@ app.get('/api/proposals', requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('Error listing proposals:', err);
     res.status(500).json({ error: 'Failed to list proposals' });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════
+// ── WARRANTY MANAGEMENT ROUTES ──────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+// ── Owners (Customers) CRUD ─────────────────────────────────────
+app.get('/api/owners', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM owners ORDER BY created_at DESC');
+    res.json(rows);
+  } catch (err) {
+    console.error('Error listing owners:', err);
+    res.status(500).json({ error: 'Failed to list owners' });
+  }
+});
+
+app.get('/api/owners/:id', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM owners WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Owner not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error fetching owner:', err);
+    res.status(500).json({ error: 'Failed to fetch owner' });
+  }
+});
+
+app.post('/api/owners', requireAdmin, async (req, res) => {
+  try {
+    const { name, email, phone, company } = req.body;
+    if (!name) return res.status(400).json({ error: 'Name is required' });
+    const { rows } = await pool.query(
+      'INSERT INTO owners (name, email, phone, company) VALUES ($1, $2, $3, $4) RETURNING *',
+      [name, email || null, phone || null, company || null]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error creating owner:', err);
+    res.status(500).json({ error: 'Failed to create owner' });
+  }
+});
+
+app.put('/api/owners/:id', requireAdmin, async (req, res) => {
+  try {
+    const { name, email, phone, company } = req.body;
+    const { rows } = await pool.query(
+      'UPDATE owners SET name = COALESCE($1, name), email = $2, phone = $3, company = $4 WHERE id = $5 RETURNING *',
+      [name, email || null, phone || null, company || null, req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Owner not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error updating owner:', err);
+    res.status(500).json({ error: 'Failed to update owner' });
+  }
+});
+
+app.delete('/api/owners/:id', requireAdmin, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query('DELETE FROM owners WHERE id = $1', [req.params.id]);
+    if (rowCount === 0) return res.status(404).json({ error: 'Owner not found' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting owner:', err);
+    res.status(500).json({ error: 'Failed to delete owner' });
+  }
+});
+
+// ── Properties CRUD ─────────────────────────────────────────────
+app.get('/api/properties', requireAdmin, async (req, res) => {
+  try {
+    const { owner_id } = req.query;
+    let query = 'SELECT p.*, o.name as owner_name FROM properties p LEFT JOIN owners o ON p.owner_id = o.id';
+    const params = [];
+    if (owner_id) {
+      query += ' WHERE p.owner_id = $1';
+      params.push(owner_id);
+    }
+    query += ' ORDER BY p.created_at DESC';
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) {
+    console.error('Error listing properties:', err);
+    res.status(500).json({ error: 'Failed to list properties' });
+  }
+});
+
+app.get('/api/properties/:id', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT p.*, o.name as owner_name FROM properties p LEFT JOIN owners o ON p.owner_id = o.id WHERE p.id = $1',
+      [req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Property not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error fetching property:', err);
+    res.status(500).json({ error: 'Failed to fetch property' });
+  }
+});
+
+app.post('/api/properties', requireAdmin, async (req, res) => {
+  try {
+    const { owner_id, address, city, state, zip } = req.body;
+    if (!address) return res.status(400).json({ error: 'Address is required' });
+    const { rows } = await pool.query(
+      'INSERT INTO properties (owner_id, address, city, state, zip) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [owner_id || null, address, city || null, state || null, zip || null]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error creating property:', err);
+    res.status(500).json({ error: 'Failed to create property' });
+  }
+});
+
+app.put('/api/properties/:id', requireAdmin, async (req, res) => {
+  try {
+    const { owner_id, address, city, state, zip } = req.body;
+    const { rows } = await pool.query(
+      'UPDATE properties SET owner_id = $1, address = COALESCE($2, address), city = $3, state = $4, zip = $5 WHERE id = $6 RETURNING *',
+      [owner_id || null, address, city || null, state || null, zip || null, req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Property not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error updating property:', err);
+    res.status(500).json({ error: 'Failed to update property' });
+  }
+});
+
+app.delete('/api/properties/:id', requireAdmin, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query('DELETE FROM properties WHERE id = $1', [req.params.id]);
+    if (rowCount === 0) return res.status(404).json({ error: 'Property not found' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting property:', err);
+    res.status(500).json({ error: 'Failed to delete property' });
+  }
+});
+
+// ── Roofs CRUD ──────────────────────────────────────────────────
+app.get('/api/roofs', requireAdmin, async (req, res) => {
+  try {
+    const { property_id } = req.query;
+    let query = 'SELECT r.*, p.address as property_address FROM roofs r LEFT JOIN properties p ON r.property_id = p.id';
+    const params = [];
+    if (property_id) {
+      query += ' WHERE r.property_id = $1';
+      params.push(property_id);
+    }
+    query += ' ORDER BY r.created_at DESC';
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) {
+    console.error('Error listing roofs:', err);
+    res.status(500).json({ error: 'Failed to list roofs' });
+  }
+});
+
+app.post('/api/roofs', requireAdmin, async (req, res) => {
+  try {
+    const { property_id, roof_type, size_sqft, year_installed, condition, notes } = req.body;
+    if (!property_id) return res.status(400).json({ error: 'property_id is required' });
+    const { rows } = await pool.query(
+      'INSERT INTO roofs (property_id, roof_type, size_sqft, year_installed, condition, notes) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [property_id, roof_type || null, size_sqft || null, year_installed || null, condition || null, notes || null]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error creating roof:', err);
+    res.status(500).json({ error: 'Failed to create roof' });
+  }
+});
+
+app.put('/api/roofs/:id', requireAdmin, async (req, res) => {
+  try {
+    const { roof_type, size_sqft, year_installed, condition, notes } = req.body;
+    const { rows } = await pool.query(
+      'UPDATE roofs SET roof_type = $1, size_sqft = $2, year_installed = $3, condition = $4, notes = $5 WHERE id = $6 RETURNING *',
+      [roof_type || null, size_sqft || null, year_installed || null, condition || null, notes || null, req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Roof not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error updating roof:', err);
+    res.status(500).json({ error: 'Failed to update roof' });
+  }
+});
+
+app.delete('/api/roofs/:id', requireAdmin, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query('DELETE FROM roofs WHERE id = $1', [req.params.id]);
+    if (rowCount === 0) return res.status(404).json({ error: 'Roof not found' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting roof:', err);
+    res.status(500).json({ error: 'Failed to delete roof' });
+  }
+});
+
+// ── Warranties CRUD ─────────────────────────────────────────────
+app.get('/api/warranties', requireAdmin, async (req, res) => {
+  try {
+    const { roof_id, manufacturer } = req.query;
+    let query = `SELECT w.*, r.roof_type, r.property_id, p.address as property_address
+      FROM roof_warranties w
+      LEFT JOIN roofs r ON w.roof_id = r.id
+      LEFT JOIN properties p ON r.property_id = p.id`;
+    const params = [];
+    const conditions = [];
+    if (roof_id) { conditions.push(`w.roof_id = $${params.length + 1}`); params.push(roof_id); }
+    if (manufacturer) { conditions.push(`w.manufacturer ILIKE $${params.length + 1}`); params.push(`%${manufacturer}%`); }
+    if (conditions.length) query += ' WHERE ' + conditions.join(' AND ');
+    query += ' ORDER BY w.created_at DESC';
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) {
+    console.error('Error listing warranties:', err);
+    res.status(500).json({ error: 'Failed to list warranties' });
+  }
+});
+
+app.get('/api/warranties/manufacturers', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT DISTINCT manufacturer FROM roof_warranties WHERE manufacturer IS NOT NULL ORDER BY manufacturer'
+    );
+    res.json(rows.map(r => r.manufacturer));
+  } catch (err) {
+    console.error('Error listing manufacturers:', err);
+    res.status(500).json({ error: 'Failed to list manufacturers' });
+  }
+});
+
+app.post('/api/warranties', requireAdmin, async (req, res) => {
+  try {
+    const { roof_id, manufacturer, warranty_type, start_date, end_date, covered_amount, maintenance_plan, repair_spend_last_year, status, notes } = req.body;
+    if (!roof_id) return res.status(400).json({ error: 'roof_id is required' });
+    const { rows } = await pool.query(
+      `INSERT INTO roof_warranties (roof_id, manufacturer, warranty_type, start_date, end_date, covered_amount, maintenance_plan, repair_spend_last_year, status, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+      [roof_id, manufacturer || null, warranty_type || null, start_date || null, end_date || null,
+       covered_amount || null, maintenance_plan || null, repair_spend_last_year || 0, status || 'active', notes || null]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error creating warranty:', err);
+    res.status(500).json({ error: 'Failed to create warranty' });
+  }
+});
+
+app.put('/api/warranties/:id', requireAdmin, async (req, res) => {
+  try {
+    const { manufacturer, warranty_type, start_date, end_date, covered_amount, maintenance_plan, repair_spend_last_year, status, notes } = req.body;
+    const { rows } = await pool.query(
+      `UPDATE roof_warranties SET manufacturer = $1, warranty_type = $2, start_date = $3, end_date = $4,
+       covered_amount = $5, maintenance_plan = $6, repair_spend_last_year = $7, status = $8, notes = $9
+       WHERE id = $10 RETURNING *`,
+      [manufacturer || null, warranty_type || null, start_date || null, end_date || null,
+       covered_amount || null, maintenance_plan || null, repair_spend_last_year || 0, status || 'active', notes || null, req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Warranty not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error updating warranty:', err);
+    res.status(500).json({ error: 'Failed to update warranty' });
+  }
+});
+
+app.delete('/api/warranties/:id', requireAdmin, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query('DELETE FROM roof_warranties WHERE id = $1', [req.params.id]);
+    if (rowCount === 0) return res.status(404).json({ error: 'Warranty not found' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting warranty:', err);
+    res.status(500).json({ error: 'Failed to delete warranty' });
+  }
+});
+
+// ── Claims CRUD ─────────────────────────────────────────────────
+app.get('/api/claims', requireAdmin, async (req, res) => {
+  try {
+    const { warranty_id } = req.query;
+    let query = `SELECT c.*, w.manufacturer, w.warranty_type
+      FROM claims c LEFT JOIN roof_warranties w ON c.warranty_id = w.id`;
+    const params = [];
+    if (warranty_id) { query += ' WHERE c.warranty_id = $1'; params.push(warranty_id); }
+    query += ' ORDER BY c.created_at DESC';
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) {
+    console.error('Error listing claims:', err);
+    res.status(500).json({ error: 'Failed to list claims' });
+  }
+});
+
+app.post('/api/claims', requireAdmin, async (req, res) => {
+  try {
+    const { warranty_id, claim_date, description, amount, status, invoice_id, resolution } = req.body;
+    if (!warranty_id) return res.status(400).json({ error: 'warranty_id is required' });
+    const { rows } = await pool.query(
+      `INSERT INTO claims (warranty_id, claim_date, description, amount, status, invoice_id, resolution)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [warranty_id, claim_date || null, description || null, amount || null, status || 'pending', invoice_id || null, resolution || null]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error creating claim:', err);
+    res.status(500).json({ error: 'Failed to create claim' });
+  }
+});
+
+app.post('/api/claims/from-invoice/:invoiceId', requireAdmin, async (req, res) => {
+  try {
+    const { rows: invoiceRows } = await pool.query('SELECT * FROM invoices WHERE id = $1', [req.params.invoiceId]);
+    if (invoiceRows.length === 0) return res.status(404).json({ error: 'Invoice not found' });
+    const inv = invoiceRows[0];
+
+    // Find a warranty for this property
+    const { rows: warRows } = await pool.query(
+      `SELECT w.id FROM roof_warranties w
+       JOIN roofs r ON w.roof_id = r.id
+       WHERE r.property_id = $1 AND w.status = 'active'
+       ORDER BY w.created_at DESC LIMIT 1`,
+      [inv.property_id]
+    );
+    if (warRows.length === 0) return res.status(400).json({ error: 'No active warranty found for this property' });
+
+    const { rows } = await pool.query(
+      `INSERT INTO claims (warranty_id, description, amount, invoice_id)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [warRows[0].id, `Claim from invoice #${inv.invoice_number || inv.id}: ${inv.description || ''}`, inv.amount, String(inv.id)]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error creating claim from invoice:', err);
+    res.status(500).json({ error: 'Failed to create claim from invoice' });
+  }
+});
+
+app.put('/api/claims/:id', requireAdmin, async (req, res) => {
+  try {
+    const { description, amount, status, resolution } = req.body;
+    const { rows } = await pool.query(
+      'UPDATE claims SET description = $1, amount = $2, status = $3, resolution = $4 WHERE id = $5 RETURNING *',
+      [description || null, amount || null, status || 'pending', resolution || null, req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Claim not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error updating claim:', err);
+    res.status(500).json({ error: 'Failed to update claim' });
+  }
+});
+
+app.delete('/api/claims/:id', requireAdmin, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query('DELETE FROM claims WHERE id = $1', [req.params.id]);
+    if (rowCount === 0) return res.status(404).json({ error: 'Claim not found' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting claim:', err);
+    res.status(500).json({ error: 'Failed to delete claim' });
+  }
+});
+
+// ── Invoices CRUD ───────────────────────────────────────────────
+app.get('/api/invoices', requireAdmin, async (req, res) => {
+  try {
+    const { property_id } = req.query;
+    let query = 'SELECT i.*, p.address as property_address FROM invoices i LEFT JOIN properties p ON i.property_id = p.id';
+    const params = [];
+    if (property_id) { query += ' WHERE i.property_id = $1'; params.push(property_id); }
+    query += ' ORDER BY i.created_at DESC';
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) {
+    console.error('Error listing invoices:', err);
+    res.status(500).json({ error: 'Failed to list invoices' });
+  }
+});
+
+app.post('/api/invoices', requireAdmin, async (req, res) => {
+  try {
+    const { property_id, invoice_number, amount, description, invoice_date, status } = req.body;
+    if (!property_id) return res.status(400).json({ error: 'property_id is required' });
+    const { rows } = await pool.query(
+      `INSERT INTO invoices (property_id, invoice_number, amount, description, invoice_date, status)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [property_id, invoice_number || null, amount || null, description || null, invoice_date || null, status || 'pending']
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error creating invoice:', err);
+    res.status(500).json({ error: 'Failed to create invoice' });
+  }
+});
+
+app.put('/api/invoices/:id', requireAdmin, async (req, res) => {
+  try {
+    const { invoice_number, amount, description, invoice_date, status } = req.body;
+    const { rows } = await pool.query(
+      'UPDATE invoices SET invoice_number = $1, amount = $2, description = $3, invoice_date = $4, status = $5 WHERE id = $6 RETURNING *',
+      [invoice_number || null, amount || null, description || null, invoice_date || null, status || 'pending', req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Invoice not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error updating invoice:', err);
+    res.status(500).json({ error: 'Failed to update invoice' });
+  }
+});
+
+app.delete('/api/invoices/:id', requireAdmin, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query('DELETE FROM invoices WHERE id = $1', [req.params.id]);
+    if (rowCount === 0) return res.status(404).json({ error: 'Invoice not found' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting invoice:', err);
+    res.status(500).json({ error: 'Failed to delete invoice' });
+  }
+});
+
+// ── Inspections CRUD ────────────────────────────────────────────
+app.get('/api/inspections', requireAdmin, async (req, res) => {
+  try {
+    const { roof_id } = req.query;
+    let query = `SELECT i.*, r.roof_type, p.address as property_address
+      FROM inspections i LEFT JOIN roofs r ON i.roof_id = r.id LEFT JOIN properties p ON r.property_id = p.id`;
+    const params = [];
+    if (roof_id) { query += ' WHERE i.roof_id = $1'; params.push(roof_id); }
+    query += ' ORDER BY i.inspection_date DESC';
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) {
+    console.error('Error listing inspections:', err);
+    res.status(500).json({ error: 'Failed to list inspections' });
+  }
+});
+
+app.post('/api/inspections', requireAdmin, async (req, res) => {
+  try {
+    const { roof_id, inspection_date, inspector, findings, moisture_readings, status } = req.body;
+    if (!roof_id) return res.status(400).json({ error: 'roof_id is required' });
+    const { rows } = await pool.query(
+      `INSERT INTO inspections (roof_id, inspection_date, inspector, findings, moisture_readings, status)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [roof_id, inspection_date || null, inspector || null, findings || null,
+       moisture_readings ? JSON.stringify(moisture_readings) : null, status || 'completed']
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error creating inspection:', err);
+    res.status(500).json({ error: 'Failed to create inspection' });
+  }
+});
+
+app.put('/api/inspections/:id', requireAdmin, async (req, res) => {
+  try {
+    const { inspection_date, inspector, findings, moisture_readings, status } = req.body;
+    const { rows } = await pool.query(
+      'UPDATE inspections SET inspection_date = $1, inspector = $2, findings = $3, moisture_readings = $4, status = $5 WHERE id = $6 RETURNING *',
+      [inspection_date || null, inspector || null, findings || null,
+       moisture_readings ? JSON.stringify(moisture_readings) : null, status || 'completed', req.params.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ error: 'Inspection not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error updating inspection:', err);
+    res.status(500).json({ error: 'Failed to update inspection' });
+  }
+});
+
+app.delete('/api/inspections/:id', requireAdmin, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query('DELETE FROM inspections WHERE id = $1', [req.params.id]);
+    if (rowCount === 0) return res.status(404).json({ error: 'Inspection not found' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting inspection:', err);
+    res.status(500).json({ error: 'Failed to delete inspection' });
+  }
+});
+
+// ── Photos CRUD (base64 storage) ────────────────────────────────
+app.get('/api/photos', requireAdmin, async (req, res) => {
+  try {
+    const { entity_type, entity_id } = req.query;
+    if (!entity_type || !entity_id) return res.status(400).json({ error: 'entity_type and entity_id are required' });
+    const { rows } = await pool.query(
+      'SELECT id, entity_type, entity_id, filename, mime_type, caption, created_at FROM photos WHERE entity_type = $1 AND entity_id = $2 ORDER BY created_at DESC',
+      [entity_type, entity_id]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('Error listing photos:', err);
+    res.status(500).json({ error: 'Failed to list photos' });
+  }
+});
+
+app.get('/api/photos/:id', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM photos WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Photo not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error fetching photo:', err);
+    res.status(500).json({ error: 'Failed to fetch photo' });
+  }
+});
+
+app.post('/api/photos', requireAdmin, async (req, res) => {
+  try {
+    const { entity_type, entity_id, filename, mime_type, data, caption } = req.body;
+    if (!entity_type || !entity_id || !data) {
+      return res.status(400).json({ error: 'entity_type, entity_id, and data are required' });
+    }
+    const { rows } = await pool.query(
+      'INSERT INTO photos (entity_type, entity_id, filename, mime_type, data, caption) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, entity_type, entity_id, filename, mime_type, caption, created_at',
+      [entity_type, entity_id, filename || null, mime_type || null, data, caption || null]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error uploading photo:', err);
+    res.status(500).json({ error: 'Failed to upload photo' });
+  }
+});
+
+app.delete('/api/photos/:id', requireAdmin, async (req, res) => {
+  try {
+    const { rowCount } = await pool.query('DELETE FROM photos WHERE id = $1', [req.params.id]);
+    if (rowCount === 0) return res.status(404).json({ error: 'Photo not found' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting photo:', err);
+    res.status(500).json({ error: 'Failed to delete photo' });
+  }
+});
+
+// ── Dashboard APIs ──────────────────────────────────────────────
+
+// Contractor Dashboard: KPI overview
+app.get('/api/dashboard/contractor', requireAdmin, async (req, res) => {
+  try {
+    const [owners, properties, warranties, claims, inspections] = await Promise.all([
+      pool.query('SELECT COUNT(*)::int as count FROM owners'),
+      pool.query('SELECT COUNT(*)::int as count FROM properties'),
+      pool.query(`SELECT COUNT(*)::int as total, COUNT(*) FILTER (WHERE status = 'active')::int as active,
+        COALESCE(SUM(covered_amount), 0)::numeric as total_coverage FROM roof_warranties`),
+      pool.query(`SELECT COUNT(*)::int as total, COUNT(*) FILTER (WHERE status = 'pending')::int as pending,
+        COALESCE(SUM(amount), 0)::numeric as total_amount FROM claims`),
+      pool.query('SELECT COUNT(*)::int as count FROM inspections'),
+    ]);
+
+    res.json({
+      customers: owners.rows[0].count,
+      properties: properties.rows[0].count,
+      warranties: {
+        total: warranties.rows[0].total,
+        active: warranties.rows[0].active,
+        total_coverage: warranties.rows[0].total_coverage,
+      },
+      claims: {
+        total: claims.rows[0].total,
+        pending: claims.rows[0].pending,
+        total_amount: claims.rows[0].total_amount,
+      },
+      inspections: inspections.rows[0].count,
+    });
+  } catch (err) {
+    console.error('Error fetching contractor dashboard:', err);
+    res.status(500).json({ error: 'Failed to fetch dashboard' });
+  }
+});
+
+// Customer Dashboard: drill down by owner
+app.get('/api/dashboard/customer/:ownerId', requireAdmin, async (req, res) => {
+  try {
+    const ownerId = req.params.ownerId;
+    const [owner, properties, warranties, claims] = await Promise.all([
+      pool.query('SELECT * FROM owners WHERE id = $1', [ownerId]),
+      pool.query('SELECT * FROM properties WHERE owner_id = $1 ORDER BY created_at DESC', [ownerId]),
+      pool.query(
+        `SELECT w.*, r.property_id, p.address as property_address
+         FROM roof_warranties w
+         JOIN roofs r ON w.roof_id = r.id
+         JOIN properties p ON r.property_id = p.id
+         WHERE p.owner_id = $1 ORDER BY w.created_at DESC`, [ownerId]
+      ),
+      pool.query(
+        `SELECT c.*, w.manufacturer
+         FROM claims c
+         JOIN roof_warranties w ON c.warranty_id = w.id
+         JOIN roofs r ON w.roof_id = r.id
+         JOIN properties p ON r.property_id = p.id
+         WHERE p.owner_id = $1 ORDER BY c.created_at DESC`, [ownerId]
+      ),
+    ]);
+
+    if (owner.rows.length === 0) return res.status(404).json({ error: 'Owner not found' });
+
+    res.json({
+      owner: owner.rows[0],
+      properties: properties.rows,
+      warranties: warranties.rows,
+      claims: claims.rows,
+    });
+  } catch (err) {
+    console.error('Error fetching customer dashboard:', err);
+    res.status(500).json({ error: 'Failed to fetch customer dashboard' });
+  }
+});
+
+// Property Dashboard: drill down by property
+app.get('/api/dashboard/property/:propertyId', requireAdmin, async (req, res) => {
+  try {
+    const propertyId = req.params.propertyId;
+    const [property, roofs, warranties, claims, invoices, inspections] = await Promise.all([
+      pool.query('SELECT p.*, o.name as owner_name FROM properties p LEFT JOIN owners o ON p.owner_id = o.id WHERE p.id = $1', [propertyId]),
+      pool.query('SELECT * FROM roofs WHERE property_id = $1 ORDER BY created_at DESC', [propertyId]),
+      pool.query(
+        `SELECT w.*, r.roof_type FROM roof_warranties w
+         JOIN roofs r ON w.roof_id = r.id WHERE r.property_id = $1 ORDER BY w.created_at DESC`, [propertyId]
+      ),
+      pool.query(
+        `SELECT c.*, w.manufacturer FROM claims c
+         JOIN roof_warranties w ON c.warranty_id = w.id
+         JOIN roofs r ON w.roof_id = r.id WHERE r.property_id = $1 ORDER BY c.created_at DESC`, [propertyId]
+      ),
+      pool.query('SELECT * FROM invoices WHERE property_id = $1 ORDER BY invoice_date DESC', [propertyId]),
+      pool.query(
+        `SELECT i.*, r.roof_type FROM inspections i
+         JOIN roofs r ON i.roof_id = r.id WHERE r.property_id = $1 ORDER BY i.inspection_date DESC`, [propertyId]
+      ),
+    ]);
+
+    if (property.rows.length === 0) return res.status(404).json({ error: 'Property not found' });
+
+    res.json({
+      property: property.rows[0],
+      roofs: roofs.rows,
+      warranties: warranties.rows,
+      claims: claims.rows,
+      invoices: invoices.rows,
+      inspections: inspections.rows,
+    });
+  } catch (err) {
+    console.error('Error fetching property dashboard:', err);
+    res.status(500).json({ error: 'Failed to fetch property dashboard' });
+  }
+});
+
+// ── Full client onboarding (AddClientWizard) ────────────────────
+app.post('/api/onboard-client', requireAdmin, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { owner, property, roof, warranty } = req.body;
+
+    if (!owner?.name || !property?.address) {
+      return res.status(400).json({ error: 'Owner name and property address are required' });
+    }
+
+    // Create owner
+    const { rows: ownerRows } = await client.query(
+      'INSERT INTO owners (name, email, phone, company) VALUES ($1, $2, $3, $4) RETURNING *',
+      [owner.name, owner.email || null, owner.phone || null, owner.company || null]
+    );
+    const newOwner = ownerRows[0];
+
+    // Create property
+    const { rows: propRows } = await client.query(
+      'INSERT INTO properties (owner_id, address, city, state, zip) VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [newOwner.id, property.address, property.city || null, property.state || null, property.zip || null]
+    );
+    const newProp = propRows[0];
+
+    // Create roof if provided
+    let newRoof = null;
+    if (roof) {
+      const { rows: roofRows } = await client.query(
+        'INSERT INTO roofs (property_id, roof_type, size_sqft, year_installed, condition, notes) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+        [newProp.id, roof.roof_type || null, roof.size_sqft || null, roof.year_installed || null, roof.condition || null, roof.notes || null]
+      );
+      newRoof = roofRows[0];
+    }
+
+    // Create warranty if provided and roof exists
+    let newWarranty = null;
+    if (warranty && newRoof) {
+      const { rows: warRows } = await client.query(
+        `INSERT INTO roof_warranties (roof_id, manufacturer, warranty_type, start_date, end_date, covered_amount, maintenance_plan, status, notes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+        [newRoof.id, warranty.manufacturer || null, warranty.warranty_type || null,
+         warranty.start_date || null, warranty.end_date || null, warranty.covered_amount || null,
+         warranty.maintenance_plan || null, warranty.status || 'active', warranty.notes || null]
+      );
+      newWarranty = warRows[0];
+    }
+
+    await client.query('COMMIT');
+    res.json({ owner: newOwner, property: newProp, roof: newRoof, warranty: newWarranty });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Error onboarding client:', err);
+    res.status(500).json({ error: 'Failed to onboard client' });
+  } finally {
+    client.release();
   }
 });
 
