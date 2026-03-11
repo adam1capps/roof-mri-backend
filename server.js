@@ -1072,6 +1072,42 @@ app.get('/api/proposals', requireAdmin, async (req, res) => {
   }
 });
 
+// ── GET /api/proposals/export.csv ───────────────────────────────────
+// Download all proposals as a CSV file (admin only)
+app.get('/api/proposals/export.csv', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, proposal_num, contact_name, company, email, tier, selected_tier,
+              extra_trainees, extra_kits, tracks, videography, on_roof_day,
+              total_price, status, payment_status, stripe_session_id,
+              vimeo_url, signature_name, signed_at, created_at, opened_at, open_count
+       FROM proposals ORDER BY created_at DESC`
+    );
+
+    const columns = rows.length > 0 ? Object.keys(rows[0]) : [];
+
+    function escapeCsv(val) {
+      if (val == null) return '';
+      const str = Array.isArray(val) ? val.join('; ') : String(val);
+      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return '"' + str.replace(/"/g, '""') + '"';
+      }
+      return str;
+    }
+
+    const header = columns.join(',');
+    const body = rows.map(r => columns.map(c => escapeCsv(r[c])).join(',')).join('\n');
+    const csv = header + '\n' + body;
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="proposals-export.csv"');
+    res.send(csv);
+  } catch (err) {
+    console.error('CSV export error:', err);
+    res.status(500).json({ error: 'Failed to export proposals' });
+  }
+});
+
 // ── Health ──────────────────────────────────────────────────────────
 app.get('/health', async (req, res) => {
   try {
