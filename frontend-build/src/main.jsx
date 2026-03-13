@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import ProposalPage from './pages/ProposalPage'
 import AdminLogin from './pages/AdminLogin'
 import AdminDashboard from './pages/AdminDashboard'
+import PackagesPage from './pages/PackagesPage'
 import './index.css'
 
 createRoot(document.getElementById('root')).render(
@@ -13,6 +14,7 @@ createRoot(document.getElementById('root')).render(
         <Route path="/p/:id" element={<ProposalPage />} />
         <Route path="/admin/login" element={<AdminLogin />} />
         <Route path="/admin" element={<AdminDashboard />} />
+        <Route path="/packages" element={<PackagesPage />} />
         <Route path="*" element={
           <div className="page-wrapper">
             <header className="site-header">
