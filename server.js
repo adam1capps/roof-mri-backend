@@ -45,6 +45,8 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
     const proposalId = session.metadata?.proposal_id;
+    const invoiceId = session.metadata?.invoice_id;
+
     if (proposalId) {
       try {
         await pool.query(
@@ -74,6 +76,40 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
         }
       } catch (webhookErr) {
         console.error('Webhook processing error:', webhookErr);
+        return res.status(500).json({ error: 'Webhook processing failed' });
+      }
+    }
+
+    // Handle invoice payments
+    if (invoiceId) {
+      try {
+        await pool.query(
+          `UPDATE invoices SET status = 'paid', stripe_payment_intent_id = $1, paid_at = NOW() WHERE id = $2`,
+          [session.payment_intent || session.id, invoiceId]
+        );
+        const { rows } = await pool.query('SELECT * FROM invoices WHERE id = $1', [invoiceId]);
+        if (rows.length > 0) {
+          const inv = rows[0];
+          const method = inv.payment_method === 'ach' ? 'ACH Bank Transfer' : 'Credit Card';
+          await sgMail.send({
+            to: 'adam@re-dry.com',
+            from: { email: 'invoices@roof-mri.com', name: 'Roof MRI' },
+            subject: `INVOICE PAID: ${stripHtml(inv.company)} — $${Number(inv.total).toLocaleString()}`,
+            html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
+              <div style="background:#00bd70;padding:16px 20px;text-align:center">
+                <span style="color:#fff;font-size:16px;font-weight:700">INVOICE PAID</span>
+              </div>
+              <div style="padding:20px;background:#fff;border:1px solid #e2e8f0">
+                <p style="font-size:14px;color:#374151"><strong>${stripHtml(inv.company)}</strong> paid invoice ${inv.invoice_num ? '#' + inv.invoice_num : inv.id}</p>
+                <p style="font-size:18px;color:#00bd70;font-weight:700">$${Number(inv.total).toLocaleString()}</p>
+                <p style="font-size:13px;color:#64748b">Payment method: ${method}</p>
+                ${inv.ach_authorized_by ? `<p style="font-size:13px;color:#64748b">ACH authorized by: ${stripHtml(inv.ach_authorized_by)}</p>` : ''}
+              </div>
+            </div>`
+          });
+        }
+      } catch (webhookErr) {
+        console.error('Invoice webhook processing error:', webhookErr);
         return res.status(500).json({ error: 'Webhook processing failed' });
       }
     }
@@ -192,6 +228,40 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
+
+  // Invoices table
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS invoices (
+      id TEXT PRIMARY KEY,
+      invoice_num TEXT,
+      proposal_id TEXT REFERENCES proposals(id),
+      contact_name TEXT NOT NULL,
+      company TEXT NOT NULL,
+      email TEXT NOT NULL,
+      accounting_email TEXT,
+      line_items JSONB NOT NULL DEFAULT '[]',
+      subtotal NUMERIC NOT NULL DEFAULT 0,
+      tax_rate NUMERIC DEFAULT 0,
+      tax_amount NUMERIC DEFAULT 0,
+      total NUMERIC NOT NULL DEFAULT 0,
+      due_date DATE,
+      notes TEXT,
+      status TEXT DEFAULT 'draft',
+      payment_method TEXT,
+      ach_authorized BOOLEAN DEFAULT false,
+      ach_authorized_by TEXT,
+      ach_authorized_at TIMESTAMPTZ,
+      ach_bank_last4 TEXT,
+      stripe_payment_intent_id TEXT,
+      paid_at TIMESTAMPTZ,
+      sent_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+  // Add columns if upgrading
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS accounting_email TEXT`);
+  await pool.query(`ALTER TABLE invoices ADD COLUMN IF NOT EXISTS ach_bank_last4 TEXT`);
+
   console.log('Database initialized');
 }
 
@@ -1105,6 +1175,543 @@ app.get('/api/proposals/export.csv', requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('CSV export error:', err);
     res.status(500).json({ error: 'Failed to export proposals' });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// ── INVOICING SYSTEM ─────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════
+
+// ── Build branded invoice email ─────────────────────────────────────
+function buildInvoiceEmail(invoice, invoiceUrl) {
+  const firstName = invoice.contact_name.split(' ')[0];
+  const dueDate = invoice.due_date ? new Date(invoice.due_date).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) : 'Upon receipt';
+  const lineItems = typeof invoice.line_items === 'string' ? JSON.parse(invoice.line_items) : invoice.line_items;
+
+  let itemRows = '';
+  lineItems.forEach((item, i) => {
+    const bg = i % 2 === 0 ? '#f8fafc' : '#ffffff';
+    const qty = item.quantity || 1;
+    const amount = Number(item.amount || 0);
+    itemRows += `
+      <tr style="background:${bg};">
+        <td style="padding:10px 14px;font-size:13px;color:#1B2A4A;border-bottom:1px solid #e2e8f0;">${stripHtml(item.description)}</td>
+        <td style="padding:10px 14px;font-size:13px;color:#64748b;text-align:center;border-bottom:1px solid #e2e8f0;">${qty}</td>
+        <td style="padding:10px 14px;font-size:13px;color:#1B2A4A;text-align:right;border-bottom:1px solid #e2e8f0;">$${amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+      </tr>`;
+  });
+
+  const subtotal = Number(invoice.subtotal || 0);
+  const taxAmount = Number(invoice.tax_amount || 0);
+  const total = Number(invoice.total || 0);
+  const invoiceNum = invoice.invoice_num || invoice.id;
+
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f1f5f9;">
+<tr><td align="center" style="padding:24px 12px;">
+<table width="600" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);">
+
+<!-- Header -->
+<tr><td style="background:#1B2A4A;padding:24px 28px;text-align:center;">
+  <span style="color:#ffffff;font-size:24px;font-weight:700;letter-spacing:1px;">ROOF </span><span style="color:#00bd70;font-size:24px;font-weight:700;letter-spacing:1px;">MRI</span>
+  <br><span style="color:#94a3b8;font-size:11px;letter-spacing:2px;text-transform:uppercase;">Invoice</span>
+</td></tr>
+
+<!-- Invoice Info -->
+<tr><td style="padding:28px 28px 8px 28px;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0">
+    <tr>
+      <td style="font-size:13px;color:#64748b;">Invoice #: <strong style="color:#1B2A4A;">${invoiceNum}</strong></td>
+      <td style="font-size:13px;color:#64748b;text-align:right;">Due: <strong style="color:#1B2A4A;">${dueDate}</strong></td>
+    </tr>
+  </table>
+</td></tr>
+
+<!-- Greeting -->
+<tr><td style="padding:16px 28px 8px 28px;">
+  <p style="margin:0;font-size:15px;color:#475569;line-height:1.7;">Hi ${firstName},</p>
+  <p style="margin:8px 0 0;font-size:15px;color:#475569;line-height:1.7;">Please find the invoice below for services from <strong style="color:#1B2A4A;">Roof MRI</strong>. You can view and pay this invoice securely online.</p>
+</td></tr>
+
+<!-- Line Items -->
+<tr><td style="padding:20px 28px 8px 28px;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">
+    <tr style="background:#1B2A4A;">
+      <th style="padding:10px 14px;font-size:12px;color:#fff;text-align:left;text-transform:uppercase;letter-spacing:1px;">Description</th>
+      <th style="padding:10px 14px;font-size:12px;color:#fff;text-align:center;text-transform:uppercase;letter-spacing:1px;">Qty</th>
+      <th style="padding:10px 14px;font-size:12px;color:#fff;text-align:right;text-transform:uppercase;letter-spacing:1px;">Amount</th>
+    </tr>
+    ${itemRows}
+  </table>
+</td></tr>
+
+<!-- Totals -->
+<tr><td style="padding:12px 28px 20px 28px;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0">
+    <tr>
+      <td style="padding:6px 0;font-size:13px;color:#64748b;">Subtotal</td>
+      <td style="padding:6px 0;font-size:13px;color:#1B2A4A;text-align:right;">$${subtotal.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+    </tr>
+    ${taxAmount > 0 ? `<tr>
+      <td style="padding:6px 0;font-size:13px;color:#64748b;">Tax (${Number(invoice.tax_rate || 0)}%)</td>
+      <td style="padding:6px 0;font-size:13px;color:#1B2A4A;text-align:right;">$${taxAmount.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+    </tr>` : ''}
+    <tr>
+      <td style="padding:10px 0;font-size:18px;color:#1B2A4A;font-weight:700;border-top:2px solid #e2e8f0;">Total Due</td>
+      <td style="padding:10px 0;font-size:22px;color:#00bd70;text-align:right;font-weight:700;border-top:2px solid #e2e8f0;">$${total.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+    </tr>
+  </table>
+</td></tr>
+
+${invoice.notes ? `
+<!-- Notes -->
+<tr><td style="padding:0 28px 20px 28px;">
+  <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;">
+    <p style="margin:0;font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">Notes</p>
+    <p style="margin:0;font-size:13px;color:#475569;line-height:1.5;">${stripHtml(invoice.notes)}</p>
+  </div>
+</td></tr>` : ''}
+
+<!-- CTA Button -->
+<tr><td style="padding:8px 28px 28px 28px;text-align:center;">
+  <a href="${invoiceUrl}" style="display:inline-block;background:#00bd70;color:#ffffff;font-size:16px;font-weight:700;text-decoration:none;padding:14px 40px;border-radius:8px;">
+    View &amp; Pay Invoice
+  </a>
+</td></tr>
+
+<!-- Footer -->
+<tr><td style="background:#f8fafc;padding:16px 28px;text-align:center;border-top:1px solid #e2e8f0;">
+  <p style="margin:0;font-size:11px;color:#94a3b8;">Roof MRI | Advancing the Science of Roof Moisture Detection</p>
+  <p style="margin:4px 0 0;font-size:11px;color:#94a3b8;">Questions? Reply to this email or contact adam@re-dry.com</p>
+</td></tr>
+
+</table>
+</td></tr></table>
+</body></html>`;
+}
+
+// ── Build invoice PDF ─────────────────────────────────────────────────
+function buildInvoicePdf(invoice) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    const navy = '#1B2A4A';
+    const green = '#00bd70';
+    const gray = '#64748b';
+    const pageW = doc.page.width - 100;
+    const lineItems = typeof invoice.line_items === 'string' ? JSON.parse(invoice.line_items) : invoice.line_items;
+
+    // Header
+    doc.rect(0, 0, doc.page.width, 80).fill(navy);
+    doc.fontSize(24).fill('#ffffff').text('ROOF ', 50, 28, { continued: true });
+    doc.fill(green).text('MRI');
+    doc.fontSize(10).fill('#94a3b8').text('INVOICE', 50, 55);
+
+    // Invoice details
+    const invoiceNum = invoice.invoice_num || invoice.id;
+    const dueDate = invoice.due_date ? new Date(invoice.due_date).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) : 'Upon receipt';
+
+    doc.fontSize(10).fill(gray).text('Invoice #:', 50, 100);
+    doc.fill(navy).text(invoiceNum, 130, 100);
+    doc.fill(gray).text('Date:', 50, 116);
+    doc.fill(navy).text(new Date(invoice.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }), 130, 116);
+    doc.fill(gray).text('Due:', 50, 132);
+    doc.fill(navy).text(dueDate, 130, 132);
+
+    // Bill to
+    doc.fill(gray).text('Bill To:', 350, 100);
+    doc.fontSize(11).fill(navy).text(stripHtml(invoice.contact_name), 350, 116);
+    doc.fontSize(10).fill(gray).text(stripHtml(invoice.company), 350, 132);
+    doc.text(stripHtml(invoice.email), 350, 148);
+    if (invoice.accounting_email && invoice.accounting_email !== invoice.email) {
+      doc.text(`AP: ${stripHtml(invoice.accounting_email)}`, 350, 164);
+    }
+
+    // Line items table header
+    let y = 190;
+    doc.rect(50, y, pageW, 24).fill(navy);
+    doc.fontSize(9).fill('#ffffff');
+    doc.text('DESCRIPTION', 58, y + 7, { width: 280 });
+    doc.text('QTY', 350, y + 7, { width: 50, align: 'center' });
+    doc.text('RATE', 405, y + 7, { width: 70, align: 'right' });
+    doc.text('AMOUNT', 480, y + 7, { width: 80, align: 'right' });
+    y += 24;
+
+    // Line items
+    lineItems.forEach((item, i) => {
+      if (y > 680) {
+        doc.addPage();
+        y = 50;
+      }
+      const bg = i % 2 === 0 ? '#f8fafc' : '#ffffff';
+      doc.rect(50, y, pageW, 22).fill(bg);
+      const qty = item.quantity || 1;
+      const rate = Number(item.rate || item.amount || 0);
+      const amount = Number(item.amount || 0);
+      doc.fontSize(9).fill(navy).text(stripHtml(item.description), 58, y + 6, { width: 280 });
+      doc.fill(gray).text(String(qty), 350, y + 6, { width: 50, align: 'center' });
+      doc.text(`$${rate.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 405, y + 6, { width: 70, align: 'right' });
+      doc.fill(navy).text(`$${amount.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 480, y + 6, { width: 80, align: 'right' });
+      y += 22;
+    });
+
+    // Totals
+    y += 10;
+    doc.moveTo(350, y).lineTo(560, y).stroke('#e2e8f0');
+    y += 8;
+
+    const subtotal = Number(invoice.subtotal || 0);
+    const taxAmount = Number(invoice.tax_amount || 0);
+    const total = Number(invoice.total || 0);
+
+    doc.fontSize(10).fill(gray).text('Subtotal', 350, y, { width: 130 });
+    doc.fill(navy).text(`$${subtotal.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 480, y, { width: 80, align: 'right' });
+    y += 18;
+
+    if (taxAmount > 0) {
+      doc.fill(gray).text(`Tax (${Number(invoice.tax_rate || 0)}%)`, 350, y, { width: 130 });
+      doc.fill(navy).text(`$${taxAmount.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 480, y, { width: 80, align: 'right' });
+      y += 18;
+    }
+
+    doc.moveTo(350, y).lineTo(560, y).stroke(navy);
+    y += 8;
+    doc.fontSize(14).fill(navy).text('Total Due', 350, y, { width: 130 });
+    doc.fill(green).text(`$${total.toLocaleString('en-US', { minimumFractionDigits: 2 })}`, 460, y, { width: 100, align: 'right' });
+
+    // Notes
+    if (invoice.notes) {
+      y += 40;
+      doc.fontSize(9).fill(gray).text('Notes:', 50, y);
+      y += 14;
+      doc.fontSize(9).fill(navy).text(stripHtml(invoice.notes), 50, y, { width: pageW });
+    }
+
+    // Footer
+    doc.fontSize(8).fill(gray).text(
+      'Roof MRI | Advancing the Science of Roof Moisture Detection | roof-mri.com',
+      50, doc.page.height - 40, { width: pageW, align: 'center' }
+    );
+
+    doc.end();
+  });
+}
+
+// ── Invoice rate limiter ─────────────────────────────────────────────
+const invoiceViewLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 60,
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// ── POST /api/invoices ──────────────────────────────────────────────
+// Create a new invoice (admin only)
+app.post('/api/invoices', requireAdmin, async (req, res) => {
+  try {
+    const data = req.body;
+    if (!data.contactName || !data.company || !data.email) {
+      return res.status(400).json({ error: 'contactName, company, and email are required' });
+    }
+    if (!isValidEmail(data.email)) {
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+    if (data.accountingEmail && !isValidEmail(data.accountingEmail)) {
+      return res.status(400).json({ error: 'Invalid accounting email address' });
+    }
+    if (!Array.isArray(data.lineItems) || data.lineItems.length === 0) {
+      return res.status(400).json({ error: 'At least one line item is required' });
+    }
+
+    const contactName = stripHtml(data.contactName);
+    const company = stripHtml(data.company);
+    const email = stripHtml(data.email);
+    const accountingEmail = data.accountingEmail ? stripHtml(data.accountingEmail) : null;
+
+    // Calculate totals
+    const lineItems = data.lineItems.map(item => ({
+      description: stripHtml(item.description || ''),
+      quantity: Math.max(1, parseInt(item.quantity) || 1),
+      rate: Number(item.rate) || 0,
+      amount: (Math.max(1, parseInt(item.quantity) || 1)) * (Number(item.rate) || 0),
+    }));
+    const subtotal = lineItems.reduce((sum, item) => sum + item.amount, 0);
+    const taxRate = Number(data.taxRate) || 0;
+    const taxAmount = Math.round(subtotal * taxRate) / 100;
+    const total = subtotal + taxAmount;
+
+    const id = generateId();
+    const invoiceNum = data.invoiceNum || null;
+    const dueDate = data.dueDate || null;
+    const notes = data.notes ? stripHtml(data.notes) : null;
+    const proposalId = data.proposalId || null;
+
+    await pool.query(`
+      INSERT INTO invoices (id, invoice_num, proposal_id, contact_name, company, email, accounting_email,
+        line_items, subtotal, tax_rate, tax_amount, total, due_date, notes, status)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'draft')
+    `, [id, invoiceNum, proposalId, contactName, company, email, accountingEmail,
+        JSON.stringify(lineItems), subtotal, taxRate, taxAmount, total, dueDate, notes]);
+
+    const { rows } = await pool.query('SELECT * FROM invoices WHERE id = $1', [id]);
+    res.json({ success: true, invoice: rows[0] });
+  } catch (err) {
+    console.error('Create invoice error:', err);
+    res.status(500).json({ error: 'Failed to create invoice' });
+  }
+});
+
+// ── POST /api/invoices/:id/send ─────────────────────────────────────
+// Send invoice to accounting email (or client email)
+app.post('/api/invoices/:id/send', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM invoices WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Invoice not found' });
+
+    const invoice = rows[0];
+    const baseUrl = process.env.PROPOSAL_BASE_URL || 'https://proposals.roof-mri.com';
+    const invoiceUrl = `${baseUrl}/invoice/${invoice.id}`;
+
+    // Send to accounting email if provided, otherwise client email
+    const toEmail = invoice.accounting_email || invoice.email;
+
+    const html = buildInvoiceEmail(invoice, invoiceUrl);
+    const pdfBuffer = await buildInvoicePdf(invoice);
+    const invoiceNum = invoice.invoice_num || invoice.id;
+
+    await sgMail.send({
+      to: toEmail,
+      from: { email: 'invoices@roof-mri.com', name: 'Roof MRI' },
+      replyTo: { email: 'adam@re-dry.com', name: 'Adam Capps' },
+      subject: `Invoice ${invoiceNum} from Roof MRI — ${stripHtml(invoice.company)}`,
+      html,
+      attachments: [{
+        content: pdfBuffer.toString('base64'),
+        filename: `Roof-MRI-Invoice-${invoiceNum.replace(/[^a-zA-Z0-9]/g, '-')}.pdf`,
+        type: 'application/pdf',
+        disposition: 'attachment',
+      }],
+    });
+
+    // Also CC the main client email if accounting email is different
+    if (invoice.accounting_email && invoice.accounting_email !== invoice.email) {
+      await sgMail.send({
+        to: invoice.email,
+        from: { email: 'invoices@roof-mri.com', name: 'Roof MRI' },
+        replyTo: { email: 'adam@re-dry.com', name: 'Adam Capps' },
+        subject: `Invoice ${invoiceNum} from Roof MRI — ${stripHtml(invoice.company)} (copy)`,
+        html,
+      });
+    }
+
+    // Notify Adam
+    await sgMail.send({
+      to: 'adam@re-dry.com',
+      from: { email: 'invoices@roof-mri.com', name: 'Roof MRI' },
+      subject: `Invoice Sent: ${invoice.company} — $${Number(invoice.total).toLocaleString()}`,
+      html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
+        <div style="background:#1B2A4A;padding:16px 20px;text-align:center">
+          <span style="color:#fff;font-size:16px;font-weight:700">ROOF <span style="color:#00bd70">MRI</span></span>
+        </div>
+        <div style="padding:20px;background:#fff;border:1px solid #e2e8f0">
+          <p style="font-size:14px;color:#374151"><strong>Invoice sent</strong> to ${stripHtml(toEmail)}</p>
+          <p style="font-size:13px;color:#64748b">${invoice.company} | Invoice ${invoiceNum} | $${Number(invoice.total).toLocaleString()}</p>
+          <p style="font-size:13px;color:#00bd70"><a href="${invoiceUrl}" style="color:#00bd70;">View invoice</a></p>
+        </div>
+      </div>`
+    });
+
+    // Update status
+    await pool.query(
+      `UPDATE invoices SET status = 'sent', sent_at = NOW() WHERE id = $1`,
+      [invoice.id]
+    );
+
+    res.json({ success: true, message: `Invoice sent to ${toEmail}` });
+  } catch (err) {
+    console.error('Send invoice error:', err);
+    res.status(500).json({ error: 'Failed to send invoice' });
+  }
+});
+
+// ── GET /api/invoices/:id (public) ──────────────────────────────────
+// Public endpoint — recipient views the invoice
+app.get('/api/invoices/:id', invoiceViewLimiter, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM invoices WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Invoice not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error fetching invoice:', err);
+    res.status(500).json({ error: 'Failed to load invoice' });
+  }
+});
+
+// ── POST /api/invoices/:id/authorize-ach ────────────────────────────
+// Client authorizes ACH payment and creates Stripe checkout with bank transfer
+app.post('/api/invoices/:id/authorize-ach', signLimiter, async (req, res) => {
+  try {
+    const { authorizedBy } = req.body;
+    if (!authorizedBy || typeof authorizedBy !== 'string' || authorizedBy.trim().length < 2) {
+      return res.status(400).json({ error: 'Please provide the name of the person authorizing this payment' });
+    }
+
+    const { rows } = await pool.query('SELECT * FROM invoices WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Invoice not found' });
+
+    const invoice = rows[0];
+    if (invoice.status === 'paid') {
+      return res.status(409).json({ error: 'This invoice has already been paid' });
+    }
+    if (!invoice.total || Number(invoice.total) <= 0) {
+      return res.status(400).json({ error: 'Invoice has no amount due' });
+    }
+
+    const safeAuthorizedBy = stripHtml(authorizedBy.trim());
+
+    // Record ACH authorization
+    await pool.query(
+      `UPDATE invoices SET ach_authorized = true, ach_authorized_by = $1, ach_authorized_at = NOW(), payment_method = 'ach'
+       WHERE id = $2`,
+      [safeAuthorizedBy, invoice.id]
+    );
+
+    // Create Stripe Checkout session with ACH support
+    const baseUrl = process.env.PROPOSAL_BASE_URL || 'https://proposals.roof-mri.com';
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['us_bank_account'],
+      payment_method_options: {
+        us_bank_account: {
+          financial_connections: { permissions: ['payment_method'] },
+        },
+      },
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: `Roof MRI Invoice ${invoice.invoice_num || invoice.id}`,
+            description: `Invoice for ${invoice.company}`,
+          },
+          unit_amount: Math.round(Number(invoice.total) * 100),
+        },
+        quantity: 1,
+      }],
+      mode: 'payment',
+      customer_email: invoice.accounting_email || invoice.email,
+      metadata: { invoice_id: invoice.id },
+      success_url: `${baseUrl}/invoice/${invoice.id}?payment=success`,
+      cancel_url: `${baseUrl}/invoice/${invoice.id}?payment=cancelled`,
+    });
+
+    // Notify Adam of ACH authorization
+    await sgMail.send({
+      to: 'adam@re-dry.com',
+      from: { email: 'invoices@roof-mri.com', name: 'Roof MRI' },
+      subject: `ACH AUTHORIZED: ${invoice.company} — Invoice ${invoice.invoice_num || invoice.id}`,
+      html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;color:#1B2A4A">
+        <div style="background:#1B2A4A;padding:16px 20px;text-align:center">
+          <span style="color:#fff;font-size:16px;font-weight:700">ROOF <span style="color:#00bd70">MRI</span></span>
+        </div>
+        <div style="padding:20px;background:#fff;border:1px solid #e2e8f0">
+          <p style="font-size:14px;color:#374151"><strong>${safeAuthorizedBy}</strong> at <strong>${stripHtml(invoice.company)}</strong> has authorized ACH payment.</p>
+          <p style="font-size:18px;color:#00bd70;font-weight:700">$${Number(invoice.total).toLocaleString()}</p>
+          <p style="font-size:13px;color:#64748b">They are now completing bank connection via Stripe.</p>
+        </div>
+      </div>`
+    });
+
+    res.json({ checkoutUrl: session.url });
+  } catch (err) {
+    console.error('ACH authorization error:', err);
+    res.status(500).json({ error: 'Failed to process ACH authorization' });
+  }
+});
+
+// ── POST /api/invoices/:id/pay-card ─────────────────────────────────
+// Alternative: pay invoice via credit card (Stripe Checkout)
+app.post('/api/invoices/:id/pay-card', checkoutLimiter, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM invoices WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Invoice not found' });
+
+    const invoice = rows[0];
+    if (invoice.status === 'paid') {
+      return res.status(409).json({ error: 'This invoice has already been paid' });
+    }
+    if (!invoice.total || Number(invoice.total) <= 0) {
+      return res.status(400).json({ error: 'Invoice has no amount due' });
+    }
+
+    await pool.query(`UPDATE invoices SET payment_method = 'card' WHERE id = $1`, [invoice.id]);
+
+    const baseUrl = process.env.PROPOSAL_BASE_URL || 'https://proposals.roof-mri.com';
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      line_items: [{
+        price_data: {
+          currency: 'usd',
+          product_data: {
+            name: `Roof MRI Invoice ${invoice.invoice_num || invoice.id}`,
+            description: `Invoice for ${invoice.company}`,
+          },
+          unit_amount: Math.round(Number(invoice.total) * 100),
+        },
+        quantity: 1,
+      }],
+      mode: 'payment',
+      customer_email: invoice.accounting_email || invoice.email,
+      metadata: { invoice_id: invoice.id },
+      success_url: `${baseUrl}/invoice/${invoice.id}?payment=success`,
+      cancel_url: `${baseUrl}/invoice/${invoice.id}?payment=cancelled`,
+    });
+
+    res.json({ checkoutUrl: session.url });
+  } catch (err) {
+    console.error('Card payment error:', err);
+    res.status(500).json({ error: 'Failed to create checkout session' });
+  }
+});
+
+// ── GET /api/invoices/:id/payment-status ────────────────────────────
+app.get('/api/invoices/:id/payment-status', invoiceViewLimiter, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT status, payment_method, paid_at FROM invoices WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Invoice not found' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('Error checking invoice payment status:', err);
+    res.status(500).json({ error: 'Failed to check payment status' });
+  }
+});
+
+// ── GET /api/invoices (admin) ───────────────────────────────────────
+// List all invoices (admin only)
+app.get('/api/invoices', requireAdmin, async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
+    const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+
+    const [{ rows }, { rows: countRows }] = await Promise.all([
+      pool.query(
+        `SELECT id, invoice_num, contact_name, company, email, accounting_email, total, status, payment_method,
+                ach_authorized, ach_authorized_by, due_date, sent_at, paid_at, created_at
+         FROM invoices ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+        [limit, offset]
+      ),
+      pool.query('SELECT COUNT(*)::int AS total FROM invoices'),
+    ]);
+
+    res.json({ invoices: rows, total: countRows[0].total, limit, offset });
+  } catch (err) {
+    console.error('Error listing invoices:', err);
+    res.status(500).json({ error: 'Failed to list invoices' });
   }
 });
 

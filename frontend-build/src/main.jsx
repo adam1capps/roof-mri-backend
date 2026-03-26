@@ -5,6 +5,7 @@ import ProposalPage from './pages/ProposalPage'
 import AdminLogin from './pages/AdminLogin'
 import AdminDashboard from './pages/AdminDashboard'
 import PackagesPage from './pages/PackagesPage'
+import InvoicePage from './pages/InvoicePage'
 import './index.css'
 
 createRoot(document.getElementById('root')).render(
@@ -12,6 +13,7 @@ createRoot(document.getElementById('root')).render(
     <BrowserRouter>
       <Routes>
         <Route path="/p/:id" element={<ProposalPage />} />
+        <Route path="/invoice/:id" element={<InvoicePage />} />
         <Route path="/admin/login" element={<AdminLogin />} />
         <Route path="/admin" element={<AdminDashboard />} />
         <Route path="/packages" element={<PackagesPage />} />
