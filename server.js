@@ -1189,6 +1189,56 @@ app.get('/api/admin/me', requireAdmin, (req, res) => {
   res.json({ authenticated: true, method: 'jwt', email: req.adminUser.email });
 });
 
+// ── POST /api/admin/change-password ────────────────────────────────
+// Auth-protected: requires a valid JWT (cannot be used with API key auth,
+// since we need to know which admin user to update).
+app.post('/api/admin/change-password', loginLimiter, requireAdmin, async (req, res) => {
+  try {
+    if (!req.adminUser) {
+      return res.status(403).json({ error: 'Password change requires a logged-in admin (JWT). API key auth is not allowed for this endpoint.' });
+    }
+
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'currentPassword and newPassword are required' });
+    }
+    if (newPassword.length < 10) {
+      return res.status(400).json({ error: 'New password must be at least 10 characters' });
+    }
+    if (currentPassword === newPassword) {
+      return res.status(400).json({ error: 'New password must be different from current password' });
+    }
+
+    const { rows } = await pool.query(
+      'SELECT * FROM admin_users WHERE id = $1',
+      [req.adminUser.id]
+    );
+
+    if (rows.length === 0) {
+      // Always hash to keep timing consistent
+      await bcrypt.hash(currentPassword, 12);
+      return res.status(401).json({ error: 'Admin account not found' });
+    }
+
+    const user = rows[0];
+    const match = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!match) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+
+    const newHash = await bcrypt.hash(newPassword, 12);
+    await pool.query(
+      'UPDATE admin_users SET password_hash = $1 WHERE id = $2',
+      [newHash, user.id]
+    );
+
+    res.json({ success: true, message: 'Password updated' });
+  } catch (err) {
+    console.error('Admin change-password error:', err);
+    res.status(500).json({ error: 'Failed to change password' });
+  }
+});
+
 // ── POST /api/send-proposal ────────────────────────────────────────
 app.post('/api/send-proposal', requireAdmin, async (req, res) => {
   try {
