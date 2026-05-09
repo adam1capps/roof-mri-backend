@@ -9,7 +9,6 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
 const PDFDocument = require('pdfkit');
-const path = require('path');
 const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -27,9 +26,6 @@ app.use(cors({
     cb(new Error('Not allowed by CORS'));
   }
 }));
-
-// Serve the admin dashboard at the root URL
-app.use(express.static(path.join(__dirname, 'public')));
 
 // Stripe webhook needs the raw body – mount BEFORE express.json()
 app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
