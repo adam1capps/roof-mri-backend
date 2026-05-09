@@ -1710,15 +1710,64 @@ function validateEnv() {
   }
 }
 
+// One-shot admin password reset triggered by env vars. Intended for
+// "I forgot my password" recovery: set ADMIN_RESET_EMAIL and
+// ADMIN_RESET_PASSWORD on the host, redeploy, then REMOVE the vars and
+// redeploy again so the password isn't left sitting in env.
+async function maybeResetAdminPassword() {
+  const email = process.env.ADMIN_RESET_EMAIL;
+  const password = process.env.ADMIN_RESET_PASSWORD;
+  if (!email && !password) return;
+  if (!email || !password) {
+    console.error('FATAL: ADMIN_RESET_EMAIL and ADMIN_RESET_PASSWORD must both be set to perform a reset');
+    process.exit(1);
+  }
+
+  const normalized = email.toLowerCase().trim();
+  if (!isValidEmail(normalized)) {
+    console.error('FATAL: ADMIN_RESET_EMAIL is not a valid email address');
+    process.exit(1);
+  }
+  if (!normalized.endsWith('@re-dry.com')) {
+    console.error('FATAL: ADMIN_RESET_EMAIL must be a @re-dry.com address');
+    process.exit(1);
+  }
+  if (password.length < 10) {
+    console.error('FATAL: ADMIN_RESET_PASSWORD must be at least 10 characters');
+    process.exit(1);
+  }
+
+  const hash = await bcrypt.hash(password, 12);
+  const { rowCount } = await pool.query(
+    'UPDATE admin_users SET password_hash = $1 WHERE email = $2',
+    [hash, normalized]
+  );
+
+  if (rowCount === 0) {
+    console.error(`FATAL: No admin_users row found for ${normalized}; nothing reset. Use /api/admin/setup if no admin exists yet.`);
+    process.exit(1);
+  }
+
+  console.warn('============================================================');
+  console.warn(`ADMIN PASSWORD RESET: password for ${normalized} was updated.`);
+  console.warn('ACTION REQUIRED: remove ADMIN_RESET_EMAIL and');
+  console.warn('ADMIN_RESET_PASSWORD from the environment and redeploy so');
+  console.warn('they are not left sitting in your host config.');
+  console.warn('============================================================');
+}
+
 const PORT = process.env.PORT || 3001;
 let server;
 validateEnv();
-initDB().then(() => {
-  server = app.listen(PORT, () => console.log(`Roof MRI backend on port ${PORT}`));
-}).catch(err => {
-  console.error('DB init failed:', err);
-  process.exit(1);
-});
+initDB()
+  .then(maybeResetAdminPassword)
+  .then(() => {
+    server = app.listen(PORT, () => console.log(`Roof MRI backend on port ${PORT}`));
+  })
+  .catch(err => {
+    console.error('Startup failed:', err);
+    process.exit(1);
+  });
 
 // ── Graceful shutdown ─────────────────────────────────────────────
 function shutdown(signal) {
