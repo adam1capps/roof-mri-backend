@@ -8,11 +8,9 @@ import SignaturePad from '../components/SignaturePad'
 const API = import.meta.env.VITE_API_URL || ''
 
 const TIER_NAMES = { professional: 'Professional', regional: 'Regional', enterprise: 'Enterprise' }
-const TIER_TRAINEES = { professional: 3, regional: 10, enterprise: 25 }
-const TIER_KITS = { professional: 1, regional: 2, enterprise: 4 }
 const TIER_DAYS = { professional: '1 Day', regional: '2 Days', enterprise: '4 Days' }
-const TIER_PRICES_DISPLAY = { professional: '$10K', regional: '$35K', enterprise: '$75K+' }
-const TIER_PRICE_SUB = { professional: 'one-time', regional: 'one-time', enterprise: 'custom engagement' }
+const TIER_PRICES_DISPLAY = { professional: '$10K', regional: '$35K', enterprise: '$75K' }
+const FIXED_PRICES = { professional: 10000, regional: 35000, enterprise: 75000 }
 
 function fmt(n) { return '$' + Number(n).toLocaleString('en-US') }
 
@@ -51,6 +49,31 @@ const TIER_DESCS = {
   enterprise: 'Comprehensive rollout across all tracks and locations. Fully custom, operationally capped at 4 on-site days.',
 }
 
+function getTrainingWeeks() {
+  const weeks = []
+  const today = new Date()
+  const start = new Date(today)
+  start.setDate(start.getDate() + 42) // 6 weeks out
+  // Find the next Monday from start
+  const day = start.getDay()
+  const diff = day === 0 ? 1 : day === 1 ? 0 : 8 - day
+  start.setDate(start.getDate() + diff)
+  for (let i = 0; i < 12; i++) {
+    const d = new Date(start)
+    d.setDate(d.getDate() + i * 7)
+    weeks.push(d.toISOString().split('T')[0])
+  }
+  return weeks
+}
+
+function formatWeekLabel(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00')
+  const end = new Date(d)
+  end.setDate(end.getDate() + 4)
+  const opts = { month: 'short', day: 'numeric' }
+  return `Week of ${d.toLocaleDateString('en-US', opts)} – ${end.toLocaleDateString('en-US', opts)}, ${d.getFullYear()}`
+}
+
 export default function ProposalPage() {
   const { id } = useParams()
   const [searchParams] = useSearchParams()
@@ -60,15 +83,17 @@ export default function ProposalPage() {
   const [signError, setSignError] = useState(null)
   const [justSigned, setJustSigned] = useState(false)
   const [checkingPayment, setCheckingPayment] = useState(false)
+  const [checkingDeposit, setCheckingDeposit] = useState(false)
   const [showConfigurator, setShowConfigurator] = useState(false)
   const [configuring, setConfiguring] = useState(false)
-  const [packageSummary, setPackageSummary] = useState(null) // stored after configurator confirms
-  const [fabMode, setFabMode] = useState('build') // 'build' | 'sign' | 'hidden'
+  const [fabMode, setFabMode] = useState('build')
+  const [paymentPath, setPaymentPath] = useState(null) // 'pay_now' | 'pay_later'
+  const [requestedTrainingWeek, setRequestedTrainingWeek] = useState('')
   const signatureRef = useRef(null)
 
   const paymentParam = searchParams.get('payment')
+  const depositParam = searchParams.get('deposit')
 
-  // Fetch proposal
   useEffect(() => {
     async function fetchProposal() {
       try {
@@ -79,10 +104,8 @@ export default function ProposalPage() {
         }
         const data = await res.json()
         setProposal(data)
-        // If already configured, show sign mode
         if (data.tier || data.selected_tier) {
           setFabMode('sign')
-          buildPackageSummary(data)
         }
       } catch (err) {
         setError(err.message)
@@ -99,7 +122,7 @@ export default function ProposalPage() {
     let cancelled = false
     async function pollPayment() {
       setCheckingPayment(true)
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < 15; i++) {
         if (cancelled) return
         try {
           const res = await fetch(`${API}/api/proposals/${id}/payment-status`)
@@ -112,32 +135,42 @@ export default function ProposalPage() {
         } catch { /* retry */ }
         await new Promise((r) => setTimeout(r, 2000))
       }
-      try {
-        const res = await fetch(`${API}/api/proposals/${id}?track=false`)
-        if (res.ok) { const data = await res.json(); setProposal(data) }
-      } catch { /* give up */ }
       setCheckingPayment(false)
     }
     pollPayment()
     return () => { cancelled = true }
   }, [paymentParam, proposal?.id, id])
 
-  function buildPackageSummary(p) {
-    const t = p.selected_tier || p.tier
-    if (!t) return
-    const configs = {
-      professional: { base: 10000, baseTrainees: 3, baseKits: 1, baseTracks: 0, traineeRate: 2000, kitRate: 4000, trackRate: 5000, videoRate: 2000, onRoofRate: 5000 },
-      regional: { base: 35000, baseTrainees: 10, baseKits: 2, baseTracks: 2, traineeRate: 1600, kitRate: 4000, trackRate: 5000, videoRate: 0, onRoofRate: 5000 },
-      enterprise: { base: 75000, baseTrainees: 25, baseKits: 4, baseTracks: 4, traineeRate: 0, kitRate: 4000, trackRate: 0, videoRate: 0, onRoofRate: 0 },
+  // Poll for deposit after Stripe redirect
+  useEffect(() => {
+    if (depositParam !== 'success' || !proposal) return
+    let cancelled = false
+    async function pollDeposit() {
+      setCheckingDeposit(true)
+      for (let i = 0; i < 15; i++) {
+        if (cancelled) return
+        try {
+          const res = await fetch(`${API}/api/proposals/${id}/payment-status`)
+          const data = await res.json()
+          if (data.deposit_paid) {
+            setProposal((prev) => ({
+              ...prev,
+              deposit_paid: true,
+              payment_due_date: data.payment_due_date,
+              requested_training_week: data.requested_training_week,
+            }))
+            setCheckingDeposit(false)
+            return
+          }
+        } catch { /* retry */ }
+        await new Promise((r) => setTimeout(r, 2000))
+      }
+      setCheckingDeposit(false)
     }
-    const c = configs[t]
-    if (!c) return
-    // Use the tier-specific price from the proposal if available, otherwise fallback to hardcoded base
-    const tierBasePrice = Number(p[`${t}_price`]) || c.base
-    setPackageSummary({ tier: t, config: { ...c, base: tierBasePrice }, proposal: p })
-  }
+    pollDeposit()
+    return () => { cancelled = true }
+  }, [depositParam, proposal?.id, id])
 
-  // Handlers
   async function handleConfigure(config) {
     setConfiguring(true)
     try {
@@ -154,7 +187,6 @@ export default function ProposalPage() {
       setProposal(updated)
       setShowConfigurator(false)
       setFabMode('sign')
-      buildPackageSummary(updated)
     } catch (err) {
       throw err
     } finally {
@@ -165,10 +197,14 @@ export default function ProposalPage() {
   async function handleSign(signatureName, signatureData) {
     setSignError(null)
     try {
+      const body = { signatureName, signatureData, paymentPath }
+      if (paymentPath === 'pay_later' && requestedTrainingWeek) {
+        body.requestedTrainingWeek = requestedTrainingWeek
+      }
       const res = await fetch(`${API}/api/proposals/${id}/sign`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ signatureName, signatureData }),
+        body: JSON.stringify(body),
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
@@ -176,7 +212,14 @@ export default function ProposalPage() {
         setSignError(msg)
         throw new Error(msg)
       }
-      setProposal((prev) => ({ ...prev, status: 'signed', signature_name: signatureName, signed_at: new Date().toISOString() }))
+      const newStatus = paymentPath === 'pay_later' ? 'signed_pay_later' : 'signed'
+      setProposal((prev) => ({
+        ...prev,
+        status: newStatus,
+        signature_name: signatureName,
+        signed_at: new Date().toISOString(),
+        requested_training_week: requestedTrainingWeek || prev.requested_training_week,
+      }))
       setJustSigned(true)
       setFabMode('hidden')
     } catch (err) {
@@ -185,16 +228,36 @@ export default function ProposalPage() {
     }
   }
 
-  async function handlePayNow() {
+  async function handlePayFull(method) {
+    setSignError(null)
     try {
       const res = await fetch(`${API}/api/proposals/${id}/checkout`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ method: method || 'card' }),
       })
       if (!res.ok) {
         const data = await res.json().catch(() => ({}))
         setSignError(data.error || 'Failed to start payment')
+        return
+      }
+      const data = await res.json()
+      window.location.href = data.checkoutUrl
+    } catch {
+      setSignError('Failed to connect to payment system')
+    }
+  }
+
+  async function handleDeposit() {
+    setSignError(null)
+    try {
+      const res = await fetch(`${API}/api/proposals/${id}/deposit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        setSignError(data.error || 'Failed to start deposit payment')
         return
       }
       const data = await res.json()
@@ -213,7 +276,6 @@ export default function ProposalPage() {
     else if (fabMode === 'sign') scrollToSignature()
   }
 
-  // LOADING
   if (loading) {
     return (
       <div className="container" style={{ textAlign: 'center', paddingTop: 120 }}>
@@ -223,7 +285,6 @@ export default function ProposalPage() {
     )
   }
 
-  // ERROR
   if (error) {
     return (
       <div className="container" style={{ textAlign: 'center', paddingTop: 120 }}>
@@ -233,21 +294,22 @@ export default function ProposalPage() {
     )
   }
 
-  // Derived state
   const isConfigured = !!(proposal.tier || proposal.selected_tier)
-  const isSigned = proposal.status === 'signed'
+  const isSigned = proposal.status === 'signed' || proposal.status === 'signed_pay_later'
+  const isPayLater = proposal.status === 'signed_pay_later'
   const isPaid = proposal.payment_status === 'paid'
+  const depositPaid = !!proposal.deposit_paid
   const hasPrice = proposal.total_price != null && Number(proposal.total_price) > 0
   const needsConfiguration = proposal.let_client_choose && !isConfigured
+  const selectedTier = proposal.selected_tier || proposal.tier
+  const totalPrice = Number(proposal.total_price) || (selectedTier ? FIXED_PRICES[selectedTier] : 0)
+  const balanceAfterDeposit = totalPrice - 100
   const proposalDate = proposal.created_at
     ? new Date(proposal.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
     : new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
 
-  const tierPrices = {
-    professional: proposal.professional_price,
-    regional: proposal.regional_price,
-    enterprise: proposal.enterprise_price,
-  }
+  const trainingWeeks = getTrainingWeeks()
+  const canSign = paymentPath === 'pay_now' || (paymentPath === 'pay_later' && requestedTrainingWeek)
 
   return (
     <div className="container">
@@ -292,7 +354,7 @@ export default function ProposalPage() {
         </p>
       </div>
 
-      {/* ═══ TIER CARDS (always shown if not signed/paid) ═══ */}
+      {/* TIER CARDS */}
       {!isSigned && !isPaid && (
         <>
           <div className="tier-grid">
@@ -311,7 +373,7 @@ export default function ProposalPage() {
                     </div>
                     <div className="tier-price-row">
                       <span className="tier-price">{TIER_PRICES_DISPLAY[key]}</span>
-                      <span className="tier-price-sub">{TIER_PRICE_SUB[key]}</span>
+                      <span className="tier-price-sub">one-time</span>
                     </div>
                     <p className="tier-desc">{TIER_DESCS[key]}</p>
                     <div className="tier-highlights">
@@ -328,95 +390,147 @@ export default function ProposalPage() {
             })}
           </div>
 
-          {/* CTA */}
           {needsConfiguration && (
             <div className="cta-section">
               <button className="cta-btn" onClick={() => setShowConfigurator(true)} type="button">
                 Build Your Training Package
               </button>
-              <p className="cta-sub">Select your tier and customize your add-ons in under a minute.</p>
+              <p className="cta-sub">Select your tier in under a minute.</p>
             </div>
           )}
 
-          {/* COMPARISON TABLE */}
           <ComparisonTable />
 
-          {/* PACKAGE SUMMARY (after configuration) */}
-          {isConfigured && packageSummary && (
+          {/* PACKAGE SUMMARY */}
+          {isConfigured && selectedTier && (
             <div className="package-summary visible" id="packageSummary">
               <div className="pkg-sum-header">
                 <div className="pkg-sum-header-left">
                   <span className="pkg-label">Selected Package</span>
-                  <span className="pkg-tier-name">{TIER_NAMES[packageSummary.tier]}</span>
+                  <span className="pkg-tier-name">{TIER_NAMES[selectedTier]}</span>
                 </div>
-                <div className="pkg-total">{fmt(proposal.total_price)}</div>
-              </div>
-              <div className="pkg-sum-body">
-                <div className="pkg-line-item">
-                  <div><span className="line-label">{TIER_NAMES[packageSummary.tier]} Package (base)</span></div>
-                  <span className="line-value">{fmt(packageSummary.config.base)}</span>
-                </div>
-                <div className="pkg-line-item">
-                  <div>
-                    <span className="line-label">Trainees</span>
-                    <span className="line-detail">{packageSummary.config.baseTrainees} included{(proposal.extra_trainees || 0) > 0 ? ` + ${proposal.extra_trainees} additional` : ''}</span>
-                  </div>
-                  <span className="line-value">
-                    {(proposal.extra_trainees || 0) > 0 && packageSummary.config.traineeRate > 0
-                      ? fmt(proposal.extra_trainees * packageSummary.config.traineeRate)
-                      : <span className="included">Included</span>}
-                  </span>
-                </div>
-                <div className="pkg-line-item">
-                  <div>
-                    <span className="line-label">Recon Kits</span>
-                    <span className="line-detail">{packageSummary.config.baseKits} included{(proposal.extra_kits || 0) > 0 ? ` + ${proposal.extra_kits} additional` : ''}</span>
-                  </div>
-                  <span className="line-value">
-                    {(proposal.extra_kits || 0) > 0
-                      ? fmt(proposal.extra_kits * packageSummary.config.kitRate)
-                      : <span className="included">Included</span>}
-                  </span>
-                </div>
-                {proposal.tracks && proposal.tracks.length > 0 && (
-                  <div className="pkg-line-item">
-                    <div>
-                      <span className="line-label">Training Tracks</span>
-                      <span className="line-detail">{proposal.tracks.join(', ')}</span>
-                    </div>
-                    <span className="line-value included">
-                      {packageSummary.tier === 'enterprise' ? 'Included' : 'Selected'}
-                    </span>
-                  </div>
-                )}
+                <div className="pkg-total">{fmt(totalPrice)}</div>
               </div>
               <div className="pkg-sum-footer">
                 {proposal.let_client_choose && (
                   <button className="edit-btn" onClick={() => setShowConfigurator(true)} type="button">Edit Selection</button>
                 )}
-                <span className="total-label">Total: {fmt(proposal.total_price)}</span>
+                <span className="total-label">Total: {fmt(totalPrice)}</span>
               </div>
             </div>
           )}
 
-          {/* TERMS & CONDITIONS */}
           <TermsAccordion companyName={proposal.company} />
+
+          {/* PAYMENT PATH SELECTOR */}
+          {isConfigured && !isSigned && (
+            <div style={{ maxWidth: 560, margin: '32px auto' }}>
+              <h3 style={{ textAlign: 'center', color: '#1B2A4A', marginBottom: 20, fontSize: '1.15rem' }}>
+                How would you like to proceed?
+              </h3>
+              <div style={{ display: 'flex', gap: 16, justifyContent: 'center', flexWrap: 'wrap' }}>
+                <div
+                  onClick={() => { setPaymentPath('pay_now'); setRequestedTrainingWeek('') }}
+                  style={{
+                    flex: '1 1 220px',
+                    maxWidth: 260,
+                    border: paymentPath === 'pay_now' ? '2px solid #00bd70' : '2px solid #e2e8f0',
+                    borderRadius: 12,
+                    padding: '24px 20px',
+                    cursor: 'pointer',
+                    textAlign: 'center',
+                    background: paymentPath === 'pay_now' ? '#f0fdf4' : '#fff',
+                    transition: 'all 0.2s',
+                  }}
+                >
+                  <div style={{ fontSize: '1.05rem', fontWeight: 700, color: '#1B2A4A', marginBottom: 4 }}>
+                    Pay Now
+                  </div>
+                  <div style={{ fontSize: '0.82rem', color: '#64748b' }}>
+                    Pay the full amount today and request any training week.
+                  </div>
+                </div>
+                <div
+                  onClick={() => setPaymentPath('pay_later')}
+                  style={{
+                    flex: '1 1 220px',
+                    maxWidth: 260,
+                    border: paymentPath === 'pay_later' ? '2px solid #00bd70' : '2px solid #e2e8f0',
+                    borderRadius: 12,
+                    padding: '24px 20px',
+                    cursor: 'pointer',
+                    textAlign: 'center',
+                    background: paymentPath === 'pay_later' ? '#f0fdf4' : '#fff',
+                    transition: 'all 0.2s',
+                  }}
+                >
+                  <div style={{ fontSize: '1.05rem', fontWeight: 700, color: '#1B2A4A', marginBottom: 4 }}>
+                    Sign Now. Pay Later.
+                  </div>
+                  <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginTop: 2 }}>
+                    ($100 deposit required)
+                  </div>
+                  <div style={{ fontSize: '0.82rem', color: '#64748b', marginTop: 6 }}>
+                    Sign today, pay the balance within 2 weeks. Pick a training week 6+ weeks out.
+                  </div>
+                </div>
+              </div>
+
+              {/* Training week picker for pay_later */}
+              {paymentPath === 'pay_later' && (
+                <div style={{ marginTop: 20, textAlign: 'center' }}>
+                  <label style={{ display: 'block', fontSize: '0.88rem', fontWeight: 600, color: '#1B2A4A', marginBottom: 8 }}>
+                    Requested Training Week
+                  </label>
+                  <select
+                    value={requestedTrainingWeek}
+                    onChange={(e) => setRequestedTrainingWeek(e.target.value)}
+                    style={{
+                      width: '100%',
+                      maxWidth: 360,
+                      padding: '10px 14px',
+                      borderRadius: 8,
+                      border: '1.5px solid #cbd5e1',
+                      fontSize: '0.9rem',
+                      color: '#1B2A4A',
+                      background: '#fff',
+                    }}
+                  >
+                    <option value="">Select a week...</option>
+                    {trainingWeeks.map((w) => (
+                      <option key={w} value={w}>{formatWeekLabel(w)}</option>
+                    ))}
+                  </select>
+                  <p style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: 6 }}>
+                    This is a requested week, not a guaranteed date. We will do our best to accommodate your preference.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* SIGNATURE BLOCK */}
           <div ref={signatureRef}>
             {signError && (
               <p style={{ color: '#dc2626', fontSize: 13, marginBottom: 12, textAlign: 'center' }}>{signError}</p>
             )}
-            <SignaturePad
-              onSign={handleSign}
-              companyName={proposal.company}
-              disabled={isSigned}
-            />
+            {isConfigured && canSign && (
+              <SignaturePad
+                onSign={handleSign}
+                companyName={proposal.company}
+                disabled={isSigned}
+              />
+            )}
+            {isConfigured && !canSign && paymentPath === 'pay_later' && (
+              <p style={{ textAlign: 'center', color: '#94a3b8', fontSize: '0.85rem', marginTop: 20 }}>
+                Please select a requested training week above to proceed.
+              </p>
+            )}
           </div>
         </>
       )}
 
-      {/* ═══ Payment Success ═══ */}
+      {/* PAYMENT SUCCESS */}
       {isPaid && (
         <div style={{ textAlign: 'center', padding: '60px 0' }}>
           <div className="signed-badge visible" style={{ display: 'inline-flex', marginBottom: 16 }}>
@@ -428,11 +542,11 @@ export default function ProposalPage() {
               <div className="signed-detail">Thank you! Your payment has been processed successfully.</div>
             </div>
           </div>
-          <p style={{ color: '#5a6377', fontSize: '0.9rem' }}>We{'\u2019'}ll be in touch shortly to get your training scheduled.</p>
+          <p style={{ color: '#5a6377', fontSize: '0.9rem' }}>We{'’'}ll be in touch shortly to get your training scheduled.</p>
         </div>
       )}
 
-      {/* Checking payment after Stripe redirect */}
+      {/* Checking payment spinner */}
       {checkingPayment && !isPaid && (
         <div style={{ textAlign: 'center', padding: '60px 0' }}>
           <div className="spinner" />
@@ -440,8 +554,16 @@ export default function ProposalPage() {
         </div>
       )}
 
-      {/* ═══ Signed confirmation + Pay Now ═══ */}
-      {isSigned && !isPaid && !checkingPayment && (
+      {/* Checking deposit spinner */}
+      {checkingDeposit && !depositPaid && (
+        <div style={{ textAlign: 'center', padding: '60px 0' }}>
+          <div className="spinner" />
+          <p style={{ marginTop: 12, color: '#9ba3b5', fontSize: 14 }}>Confirming your deposit...</p>
+        </div>
+      )}
+
+      {/* SIGNED — PAY NOW PATH */}
+      {isSigned && !isPayLater && !isPaid && !checkingPayment && (
         <div style={{ textAlign: 'center', padding: '60px 0' }}>
           <div className="signed-badge visible" style={{ display: 'inline-flex', marginBottom: 20 }}>
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#00a35f" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -462,15 +584,111 @@ export default function ProposalPage() {
               {signError && (
                 <p style={{ color: '#dc2626', fontSize: 13, marginBottom: 12 }}>{signError}</p>
               )}
-              <div>
-                <button className="cta-btn" onClick={handlePayNow} type="button" style={{ fontSize: '1rem' }}>
-                  Pay Now {'\u2014'} {fmt(proposal.total_price)}
+              <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
+                <button className="cta-btn" onClick={() => handlePayFull('card')} type="button" style={{ fontSize: '1rem' }}>
+                  Pay by Card — {fmt(totalPrice)}
                 </button>
-                <p style={{ color: '#9ba3b5', fontSize: 12, marginTop: 10 }}>
-                  Secure payment powered by Stripe
-                </p>
+                <button
+                  className="cta-btn"
+                  onClick={() => handlePayFull('ach')}
+                  type="button"
+                  style={{ fontSize: '1rem', background: '#1B2A4A' }}
+                >
+                  Pay by ACH — {fmt(totalPrice)}
+                </button>
               </div>
+              <p style={{ color: '#9ba3b5', fontSize: 12, marginTop: 10 }}>
+                Secure payment powered by Stripe
+              </p>
             </>
+          )}
+        </div>
+      )}
+
+      {/* SIGNED — PAY LATER PATH */}
+      {isPayLater && !isPaid && !checkingPayment && !checkingDeposit && (
+        <div style={{ textAlign: 'center', padding: '60px 0' }}>
+          <div className="signed-badge visible" style={{ display: 'inline-flex', marginBottom: 20 }}>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#00a35f" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12" />
+            </svg>
+            <div>
+              <div className="signed-text" style={{ fontSize: '1.1rem' }}>
+                {justSigned ? 'Proposal Signed!' : 'Proposal Signed'}
+              </div>
+              <div className="signed-detail">
+                Signed by {proposal.signature_name}
+                {proposal.signed_at && ` on ${new Date(proposal.signed_at).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}`}
+              </div>
+            </div>
+          </div>
+
+          {proposal.requested_training_week && (
+            <p style={{ color: '#1B2A4A', fontSize: '0.9rem', marginBottom: 16 }}>
+              Requested training week: <strong>{formatWeekLabel(proposal.requested_training_week)}</strong>
+            </p>
+          )}
+
+          {signError && (
+            <p style={{ color: '#dc2626', fontSize: 13, marginBottom: 12 }}>{signError}</p>
+          )}
+
+          {/* Deposit not yet paid */}
+          {!depositPaid && (
+            <div>
+              <p style={{ color: '#64748b', fontSize: '0.9rem', marginBottom: 16 }}>
+                A $100 deposit is required to confirm your training week request.
+              </p>
+              <button className="cta-btn" onClick={handleDeposit} type="button" style={{ fontSize: '1rem' }}>
+                Pay $100 Deposit
+              </button>
+              <p style={{ color: '#9ba3b5', fontSize: 12, marginTop: 10 }}>
+                Secure payment powered by Stripe
+              </p>
+            </div>
+          )}
+
+          {/* Deposit paid, balance remaining */}
+          {depositPaid && (
+            <div>
+              <div style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                background: '#f0fdf4',
+                border: '1px solid #bbf7d0',
+                borderRadius: 8,
+                padding: '8px 16px',
+                marginBottom: 20,
+              }}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00a35f" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+                <span style={{ color: '#166534', fontSize: '0.85rem', fontWeight: 600 }}>$100 Deposit Paid</span>
+              </div>
+              {proposal.payment_due_date && (
+                <p style={{ color: '#64748b', fontSize: '0.85rem', marginBottom: 16 }}>
+                  Balance of {fmt(balanceAfterDeposit)} due by{' '}
+                  <strong>{new Date(proposal.payment_due_date).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</strong>
+                </p>
+              )}
+              <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
+                <button className="cta-btn" onClick={() => handlePayFull('card')} type="button" style={{ fontSize: '1rem' }}>
+                  Pay Balance by Card — {fmt(balanceAfterDeposit)}
+                </button>
+                <button
+                  className="cta-btn"
+                  onClick={() => handlePayFull('ach')}
+                  type="button"
+                  style={{ fontSize: '1rem', background: '#1B2A4A' }}
+                >
+                  Pay Balance by ACH — {fmt(balanceAfterDeposit)}
+                </button>
+              </div>
+              <p style={{ color: '#9ba3b5', fontSize: 12, marginTop: 10 }}>
+                Secure payment powered by Stripe
+              </p>
+            </div>
           )}
         </div>
       )}
@@ -482,7 +700,7 @@ export default function ProposalPage() {
         <p>Every package can be customized. Enterprise packages are fully custom and built through a consultation.</p>
       </div>
 
-      {/* ═══ FLOATING ACTION BUTTON ═══ */}
+      {/* FLOATING ACTION BUTTON */}
       {fabMode !== 'hidden' && !isSigned && !isPaid && (
         <button className="floating-sign-btn" onClick={floatingAction} type="button">
           {fabMode === 'build' ? (
@@ -503,10 +721,9 @@ export default function ProposalPage() {
         </button>
       )}
 
-      {/* ═══ Configurator Modal ═══ */}
+      {/* Configurator Modal */}
       {showConfigurator && (
         <Configurator
-          prices={tierPrices}
           onConfirm={handleConfigure}
           onClose={() => setShowConfigurator(false)}
           submitting={configuring}
