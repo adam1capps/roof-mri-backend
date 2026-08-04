@@ -776,6 +776,41 @@ app.get('/api/admin/me', requireAdmin, (req, res) => {
   res.json({ authenticated: true, method: 'jwt', email: req.adminUser.email });
 });
 
+// ── POST /api/admin/users ──────────────────────────────────────────
+// Create an additional admin user (requires an existing admin's auth)
+app.post('/api/admin/users', requireAdmin, async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+    if (!email.toLowerCase().trim().endsWith('@re-dry.com')) {
+      return res.status(403).json({ error: 'Only @re-dry.com email addresses are allowed' });
+    }
+    if (password.length < 10) {
+      return res.status(400).json({ error: 'Password must be at least 10 characters' });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const hash = await bcrypt.hash(password, 12);
+    const { rows: created } = await pool.query(
+      'INSERT INTO admin_users (email, password_hash) VALUES ($1, $2) RETURNING id, email',
+      [normalizedEmail, hash]
+    );
+
+    res.json({ success: true, user: { id: created[0].id, email: created[0].email }, message: `Admin user ${created[0].email} created` });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'A user with that email already exists' });
+    }
+    console.error('Create admin user error:', err);
+    res.status(500).json({ error: 'Failed to create admin user' });
+  }
+});
+
 // ── POST /api/send-proposal ────────────────────────────────────────
 app.post('/api/send-proposal', requireAdmin, async (req, res) => {
   try {
