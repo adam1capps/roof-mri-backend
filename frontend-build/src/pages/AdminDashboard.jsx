@@ -12,13 +12,12 @@ async function authHeaders() {
 }
 
 // ── Proposal Form ──────────────────────────────────────────────────
+const FIXED_PRICE_LABELS = { professional: '$10,000', regional: '$35,000', enterprise: '$75,000' }
+
 function ProposalForm({ onSent }) {
   const [form, setForm] = useState({
-    contactName: '', company: '', email: '', tier: 'professional',
-    totalPrice: '', extraTrainees: '0', extraKits: '0',
-    videography: false, onRoofDay: false, vimeoUrl: '',
-    letClientChoose: false, proposalNum: '',
-    professionalPrice: '10000', regionalPrice: '35000', enterprisePrice: '75000'
+    contactName: '', company: '', email: '', tier: '',
+    vimeoUrl: '', proposalNum: ''
   })
   const [sending, setSending] = useState(false)
   const [result, setResult] = useState(null)
@@ -38,40 +37,15 @@ function ProposalForm({ onSent }) {
     setSending(true)
 
     try {
-      // Validate prices
-      if (form.letClientChoose) {
-        const hasProPrice = Number(form.professionalPrice) > 0
-        const hasRegPrice = Number(form.regionalPrice) > 0
-        const hasEntPrice = Number(form.enterprisePrice) > 0
-        if (!hasProPrice && !hasRegPrice && !hasEntPrice) {
-          setError('Please enter a price for at least one package tier.')
-          setSending(false)
-          return
-        }
-      } else {
-        if (!Number(form.totalPrice) || Number(form.totalPrice) <= 0) {
-          setError('Please enter the total price for the proposal.')
-          setSending(false)
-          return
-        }
-      }
-
+      // Pricing is fixed at $10K / $35K / $75K – the server enforces it,
+      // so the form only sends who the proposal is for and which tier (if any)
       const body = {
         contactName: form.contactName,
         company: form.company,
         email: form.email,
-        tier: form.letClientChoose ? null : form.tier,
-        totalPrice: form.letClientChoose ? null : Number(form.totalPrice) || 0,
-        extraTrainees: Number(form.extraTrainees) || 0,
-        extraKits: Number(form.extraKits) || 0,
-        videography: form.videography,
-        onRoofDay: form.onRoofDay,
+        tier: form.tier || null,
         vimeoUrl: form.vimeoUrl || null,
-        letClientChoose: form.letClientChoose,
         proposalNum: form.proposalNum || null,
-        professionalPrice: form.letClientChoose ? (Number(form.professionalPrice) || null) : null,
-        regionalPrice: form.letClientChoose ? (Number(form.regionalPrice) || null) : null,
-        enterprisePrice: form.letClientChoose ? (Number(form.enterprisePrice) || null) : null,
       }
 
       const res = await fetch(`${API}/api/send-proposal`, {
@@ -84,11 +58,8 @@ function ProposalForm({ onSent }) {
 
       setResult(data)
       setForm({
-        contactName: '', company: '', email: '', tier: 'professional',
-        totalPrice: '', extraTrainees: '0', extraKits: '0',
-        videography: false, onRoofDay: false, vimeoUrl: '',
-        letClientChoose: false, proposalNum: '',
-        professionalPrice: '10000', regionalPrice: '35000', enterprisePrice: '75000'
+        contactName: '', company: '', email: '', tier: '',
+        vimeoUrl: '', proposalNum: ''
       })
       if (onSent) onSent()
     } catch (err) {
@@ -137,72 +108,23 @@ function ProposalForm({ onSent }) {
         </div>
 
         <div className="admin-field">
-          <label className="admin-checkbox">
-            <input type="checkbox" checked={form.letClientChoose} onChange={set('letClientChoose')} />
-            Let client choose their package
-          </label>
+          <label>Package Tier</label>
+          <select value={form.tier} onChange={set('tier')}>
+            <option value="">Let client choose their package</option>
+            <option value="professional">Professional — $10,000 (3 trainees, 1 kit)</option>
+            <option value="regional">Regional — $35,000 (10 trainees, 2 kits)</option>
+            <option value="enterprise">Enterprise — $75,000 (25 trainees, 4 kits)</option>
+          </select>
         </div>
 
-        {!form.letClientChoose ? (
-          <>
-            <div className="admin-row">
-              <div className="admin-field">
-                <label>Package Tier</label>
-                <select value={form.tier} onChange={set('tier')}>
-                  <option value="professional">Professional (3 trainees, 1 kit)</option>
-                  <option value="regional">Regional (10 trainees, 2 kits)</option>
-                  <option value="enterprise">Enterprise (25 trainees, 4 kits)</option>
-                </select>
-              </div>
-              <div className="admin-field">
-                <label>Total Price ($)</label>
-                <input type="number" value={form.totalPrice} onChange={set('totalPrice')} min="0" step="0.01" />
-              </div>
-            </div>
-
-            <div className="admin-row">
-              <div className="admin-field">
-                <label>Extra Trainees</label>
-                <input type="number" value={form.extraTrainees} onChange={set('extraTrainees')} min="0" />
-              </div>
-              <div className="admin-field">
-                <label>Extra Kits</label>
-                <input type="number" value={form.extraKits} onChange={set('extraKits')} min="0" />
-              </div>
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="admin-row" style={{ gap: '10px' }}>
-              <div className="admin-field">
-                <label>Professional Price ($)</label>
-                <input type="number" value={form.professionalPrice} onChange={set('professionalPrice')} min="0" step="0.01" placeholder="3 trainees, 1 kit" />
-              </div>
-              <div className="admin-field">
-                <label>Regional Price ($)</label>
-                <input type="number" value={form.regionalPrice} onChange={set('regionalPrice')} min="0" step="0.01" placeholder="10 trainees, 2 kits" />
-              </div>
-              <div className="admin-field">
-                <label>Enterprise Price ($)</label>
-                <input type="number" value={form.enterprisePrice} onChange={set('enterprisePrice')} min="0" step="0.01" placeholder="25 trainees, 4 kits" />
-              </div>
-            </div>
-          </>
-        )}
-
-        <div className="admin-row">
-          <div className="admin-field">
-            <label className="admin-checkbox">
-              <input type="checkbox" checked={form.videography} onChange={set('videography')} />
-              Include Videography
-            </label>
-          </div>
-          <div className="admin-field">
-            <label className="admin-checkbox">
-              <input type="checkbox" checked={form.onRoofDay} onChange={set('onRoofDay')} />
-              Include On-Roof Training Day
-            </label>
-          </div>
+        <div style={{
+          background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8,
+          padding: '12px 16px', marginBottom: 4, fontSize: 13, color: '#64748b'
+        }}>
+          Pricing is fixed: <strong style={{ color: '#1B2A4A' }}>Professional $10,000</strong>{' · '}
+          <strong style={{ color: '#1B2A4A' }}>Regional $35,000</strong>{' · '}
+          <strong style={{ color: '#1B2A4A' }}>Enterprise $75,000</strong>
+          {form.tier && <> — this proposal will be sent at <strong style={{ color: '#00a35f' }}>{FIXED_PRICE_LABELS[form.tier]}</strong></>}
         </div>
 
         <div className="admin-field">
@@ -242,32 +164,58 @@ function ProposalsList({ proposals, loading }) {
                 <th>Date</th>
                 <th>Company</th>
                 <th>Contact</th>
+                <th>Tier</th>
                 <th>Total</th>
                 <th>Status</th>
                 <th>Payment</th>
+                <th>Training Week</th>
+                <th>Due</th>
                 <th>Link</th>
               </tr>
             </thead>
             <tbody>
-              {proposals.map(p => (
-                <tr key={p.id}>
-                  <td>{new Date(p.created_at).toLocaleDateString()}</td>
-                  <td>{p.company}</td>
-                  <td>{p.contact_name}</td>
-                  <td>{p.total_price ? `$${Number(p.total_price).toLocaleString()}` : '—'}</td>
-                  <td>
-                    <span className={`admin-badge badge-${p.status}`}>{p.status}</span>
-                  </td>
-                  <td>
-                    <span className={`admin-badge badge-${p.payment_status}`}>{p.payment_status}</span>
-                  </td>
-                  <td>
-                    <a href={`/p/${p.id}`} target="_blank" rel="noopener noreferrer" className="admin-link">
-                      View
-                    </a>
-                  </td>
-                </tr>
-              ))}
+              {proposals.map(p => {
+                const isPayLater = p.status === 'signed_pay_later'
+                const overdue = isPayLater && p.payment_status !== 'paid' && p.payment_due_date &&
+                  new Date(p.payment_due_date) < new Date()
+                return (
+                  <tr key={p.id}>
+                    <td>{new Date(p.created_at).toLocaleDateString()}</td>
+                    <td>{p.company}</td>
+                    <td>{p.contact_name}</td>
+                    <td style={{ textTransform: 'capitalize' }}>{p.tier || '—'}</td>
+                    <td>{p.total_price ? `$${Number(p.total_price).toLocaleString()}` : '—'}</td>
+                    <td>
+                      <span className={`admin-badge badge-${p.status}`}>
+                        {isPayLater ? 'signed · pay later' : p.status}
+                      </span>
+                      {isPayLater && (
+                        <div style={{ fontSize: 11, color: p.deposit_paid ? '#00a35f' : '#b45309', marginTop: 2 }}>
+                          {p.deposit_paid ? '$100 deposit paid' : 'deposit pending'}
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      <span className={`admin-badge badge-${p.payment_status}`}>{p.payment_status}</span>
+                    </td>
+                    <td>
+                      {p.requested_training_week
+                        ? new Date(p.requested_training_week).toLocaleDateString()
+                        : '—'}
+                    </td>
+                    <td style={overdue ? { color: '#dc2626', fontWeight: 700 } : {}}>
+                      {p.payment_due_date && p.payment_status !== 'paid'
+                        ? new Date(p.payment_due_date).toLocaleDateString() + (overdue ? ' !' : '')
+                        : '—'}
+                    </td>
+                    <td>
+                      <a href={`/p/${p.id}`} target="_blank" rel="noopener noreferrer" className="admin-link">
+                        View
+                      </a>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>

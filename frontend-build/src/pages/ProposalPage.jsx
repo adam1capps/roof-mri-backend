@@ -298,6 +298,8 @@ export default function ProposalPage() {
   const isSigned = proposal.status === 'signed' || proposal.status === 'signed_pay_later'
   const isPayLater = proposal.status === 'signed_pay_later'
   const isPaid = proposal.payment_status === 'paid'
+  const isProcessing = proposal.payment_status === 'processing'
+  const paymentFailed = proposal.payment_status === 'failed'
   const depositPaid = !!proposal.deposit_paid
   const hasPrice = proposal.total_price != null && Number(proposal.total_price) > 0
   const needsConfiguration = proposal.let_client_choose && !isConfigured
@@ -546,6 +548,47 @@ export default function ProposalPage() {
         </div>
       )}
 
+      {/* ACH payment processing */}
+      {isProcessing && !isPaid && (
+        <div style={{ textAlign: 'center', padding: '60px 0' }}>
+          <div className="signed-badge visible" style={{ display: 'inline-flex', marginBottom: 16 }}>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+            </svg>
+            <div>
+              <div className="signed-text" style={{ fontSize: '1.1rem' }}>Bank Transfer Processing</div>
+              <div className="signed-detail">Your ACH payment is being processed. This typically takes 2{'–'}3 business days.</div>
+            </div>
+          </div>
+          <p style={{ color: '#5a6377', fontSize: '0.9rem' }}>You{'’'}ll receive a confirmation email once the payment clears.</p>
+        </div>
+      )}
+
+      {/* ACH payment failed */}
+      {paymentFailed && (
+        <div style={{ textAlign: 'center', padding: '60px 0' }}>
+          <div className="signed-badge visible" style={{ display: 'inline-flex', marginBottom: 16 }}>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="10" /><line x1="15" y1="9" x2="9" y2="15" /><line x1="9" y1="9" x2="15" y2="15" />
+            </svg>
+            <div>
+              <div className="signed-text" style={{ fontSize: '1.1rem', color: '#dc2626' }}>Payment Failed</div>
+              <div className="signed-detail">Your bank transfer could not be completed. Please try again or use a different payment method.</div>
+            </div>
+          </div>
+          {hasPrice && (
+            <div style={{ marginTop: 12, display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>
+              <button className="cta-btn" onClick={() => handlePayFull('card')} type="button" style={{ fontSize: '1rem' }}>
+                Retry by Card {'—'} {fmt(depositPaid ? balanceAfterDeposit : totalPrice)}
+              </button>
+              <button className="cta-btn" onClick={() => handlePayFull('ach')} type="button" style={{ fontSize: '1rem', background: '#1B2A4A' }}>
+                Retry by ACH {'—'} {fmt(depositPaid ? balanceAfterDeposit : totalPrice)}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Checking payment spinner */}
       {checkingPayment && !isPaid && (
         <div style={{ textAlign: 'center', padding: '60px 0' }}>
@@ -563,7 +606,7 @@ export default function ProposalPage() {
       )}
 
       {/* SIGNED — PAY NOW PATH */}
-      {isSigned && !isPayLater && !isPaid && !checkingPayment && (
+      {isSigned && !isPayLater && !isPaid && !isProcessing && !paymentFailed && !checkingPayment && (
         <div style={{ textAlign: 'center', padding: '60px 0' }}>
           <div className="signed-badge visible" style={{ display: 'inline-flex', marginBottom: 20 }}>
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#00a35f" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -606,7 +649,7 @@ export default function ProposalPage() {
       )}
 
       {/* SIGNED — PAY LATER PATH */}
-      {isPayLater && !isPaid && !checkingPayment && !checkingDeposit && (
+      {isPayLater && !isPaid && !isProcessing && !paymentFailed && !checkingPayment && !checkingDeposit && (
         <div style={{ textAlign: 'center', padding: '60px 0' }}>
           <div className="signed-badge visible" style={{ display: 'inline-flex', marginBottom: 20 }}>
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#00a35f" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
