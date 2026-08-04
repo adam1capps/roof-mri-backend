@@ -389,48 +389,46 @@ function InvoiceForm({ onSent }) {
             Line Items
           </label>
           {lineItems.map((item, i) => (
-            <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center' }}>
+            <div key={i} className="line-item">
               <input
+                className="line-item-desc"
                 value={item.description}
                 onChange={e => updateItem(i, 'description', e.target.value)}
                 placeholder="Description"
-                style={{ flex: 3, padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 14 }}
               />
               <input
+                className="line-item-qty"
                 type="number"
+                inputMode="numeric"
                 value={item.quantity}
                 onChange={e => updateItem(i, 'quantity', e.target.value)}
                 placeholder="Qty"
                 min="1"
-                style={{ flex: 0.5, padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 14, textAlign: 'center' }}
               />
               <input
                 type="number"
+                inputMode="decimal"
                 value={item.rate}
                 onChange={e => updateItem(i, 'rate', e.target.value)}
                 placeholder="Rate ($)"
                 min="0"
                 step="0.01"
-                style={{ flex: 1, padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 14 }}
               />
-              <span style={{ flex: 0.8, textAlign: 'right', fontSize: 14, color: '#1B2A4A', fontWeight: 600, minWidth: 80 }}>
+              <span className="line-item-amount">
                 ${((Math.max(1, parseInt(item.quantity) || 1)) * (Number(item.rate) || 0)).toLocaleString('en-US', { minimumFractionDigits: 2 })}
               </span>
               <button
                 type="button"
+                className="line-item-remove"
                 onClick={() => removeItem(i)}
                 disabled={lineItems.length <= 1}
-                style={{ background: 'none', border: 'none', color: lineItems.length <= 1 ? '#d1d5db' : '#ef4444', cursor: lineItems.length <= 1 ? 'default' : 'pointer', fontSize: 18, padding: '4px 8px' }}
+                aria-label="Remove line item"
               >
                 &times;
               </button>
             </div>
           ))}
-          <button
-            type="button"
-            onClick={addItem}
-            style={{ background: 'none', border: '1px dashed #94a3b8', color: '#64748b', padding: '6px 16px', borderRadius: 6, cursor: 'pointer', fontSize: 13, marginTop: 4 }}
-          >
+          <button type="button" className="add-line-item" onClick={addItem}>
             + Add Line Item
           </button>
         </div>

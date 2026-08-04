@@ -1672,8 +1672,77 @@ span.included {
   font-weight: 600;
 }
 
+/* Invoice line items.
+   Grid with minmax(0,…) tracks so the inputs can shrink — a plain flex
+   row lets each input hold its ~177px intrinsic width, which forces the
+   whole page wider than a phone viewport. */
+.line-item {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 0.7fr) minmax(0, 1.1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.line-item input {
+  min-width: 0;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--gray200);
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--navy);
+  background: var(--white);
+  outline: none;
+  transition: border-color 0.2s;
+}
+.line-item input:focus { border-color: var(--green); }
+.line-item-qty { text-align: center; }
+.line-item-amount {
+  text-align: right;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--navy);
+  white-space: nowrap;
+  min-width: 76px;
+}
+.line-item-remove {
+  background: none;
+  border: none;
+  color: #ef4444;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 4px 8px;
+}
+.line-item-remove:disabled { color: var(--gray300); cursor: default; }
+.add-line-item {
+  background: none;
+  border: 1px dashed var(--gray400);
+  color: var(--gray600);
+  padding: 6px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  margin-top: 4px;
+}
+
+/* Below ~640px three inputs side by side stop being usable:
+   description takes its own row, then qty / rate / amount / remove. */
+@media (max-width: 640px) {
+  .line-item {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
+    row-gap: 6px;
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid var(--gray100);
+  }
+  .line-item-desc { grid-column: 1 / -1; }
+}
+
 /* Admin table */
-.admin-table-wrap { overflow-x: auto; }
+.admin-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .admin-table {
   width: 100%;
   border-collapse: collapse;
@@ -1832,6 +1901,11 @@ span.included {
   .admin-row { flex-direction: column; gap: 14px; }
   .admin-header { flex-direction: column; text-align: center; gap: 12px; }
   .admin-wide { max-width: 100%; }
+  /* 16px keeps iOS Safari from zooming the page in when a field is tapped */
+  .admin-field input,
+  .admin-field select,
+  .admin-field textarea,
+  .line-item input { font-size: 16px; }
 }
 
 @media (max-width: 480px) {
