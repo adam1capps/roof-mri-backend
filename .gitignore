@@ -4,3 +4,7 @@ node_modules/
 .env.production
 *.log
 .DS_Store
+
+# Frontend production build config contains only PUBLIC values
+# (publishable key + API URL) and must be committed for Netlify builds
+!frontend-build/.env.production
