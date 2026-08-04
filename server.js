@@ -1422,12 +1422,13 @@ app.post('/api/admin/users', requireAdmin, async (req, res) => {
 });
 
 // ── POST /api/admin/change-password ────────────────────────────────
-// Auth-protected: requires a valid JWT (cannot be used with API key auth,
-// since we need to know which admin user to update).
+// Auth-protected: requires a logged-in admin (legacy JWT or Clerk
+// session – not API key auth, since we need to know which admin user
+// to update).
 app.post('/api/admin/change-password', loginLimiter, requireAdmin, async (req, res) => {
   try {
-    if (!req.adminUser) {
-      return res.status(403).json({ error: 'Password change requires a logged-in admin (JWT). API key auth is not allowed for this endpoint.' });
+    if (!req.adminUser || !req.adminUser.email) {
+      return res.status(403).json({ error: 'Password change requires a logged-in admin. API key auth is not allowed for this endpoint.' });
     }
 
     const { currentPassword, newPassword } = req.body;
@@ -1441,9 +1442,13 @@ app.post('/api/admin/change-password', loginLimiter, requireAdmin, async (req, r
       return res.status(400).json({ error: 'New password must be different from current password' });
     }
 
+    // Look up by email, not id: legacy JWTs carry the integer
+    // admin_users id, but Clerk sessions carry a string Clerk user id
+    // that would make the integer comparison throw. Both auth paths
+    // set adminUser.email.
     const { rows } = await pool.query(
-      'SELECT * FROM admin_users WHERE id = $1',
-      [req.adminUser.id]
+      'SELECT * FROM admin_users WHERE email = $1',
+      [req.adminUser.email.toLowerCase().trim()]
     );
 
     if (rows.length === 0) {
