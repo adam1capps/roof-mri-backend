@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { SignIn, useAuth } from '@clerk/clerk-react'
 import { CLERK_ENABLED } from '../lib/clerkBridge'
 
@@ -26,6 +26,7 @@ function GoogleSignIn() {
 
 export default function AdminLogin() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -33,6 +34,8 @@ export default function AdminLogin() {
   const [loading, setLoading] = useState(false)
   const [isSetup, setIsSetup] = useState(false)
   const [usePassword, setUsePassword] = useState(!CLERK_ENABLED)
+
+  const domainRejected = searchParams.get('error') === 'domain'
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -79,6 +82,11 @@ export default function AdminLogin() {
       {CLERK_ENABLED && !usePassword ? (
         <div className="card" style={{ borderRadius: '0 0 8px 8px' }}>
           <h2 className="admin-page-title">Sign In</h2>
+          {domainRejected && (
+            <div className="admin-error" style={{ marginBottom: 12 }}>
+              That Google account isn{'’'}t allowed. Only @re-dry.com accounts can access the admin dashboard.
+            </div>
+          )}
           <GoogleSignIn />
           <p style={{ textAlign: 'center', marginTop: 16, fontSize: 13, color: '#94a3b8' }}>
             <a href="#" onClick={e => { e.preventDefault(); setUsePassword(true); setError('') }} style={{ color: '#64748b' }}>

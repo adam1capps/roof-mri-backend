@@ -688,15 +688,17 @@ export default function AdminDashboard() {
         })
         if (cancelled) return
         if (!res.ok) {
-          localStorage.removeItem('roofmri_token')
-          navigate('/admin/login')
+          // Sign out of Clerk too — otherwise a rejected Google account
+          // bounces between /admin and /admin/login forever
+          await signOutEverywhere()
+          navigate(res.status === 403 ? '/admin/login?error=domain' : '/admin/login')
           return
         }
         const data = await res.json()
         if (!cancelled && data?.email) setAdminEmail(data.email)
       } catch {
         if (!cancelled) {
-          localStorage.removeItem('roofmri_token')
+          await signOutEverywhere()
           navigate('/admin/login')
         }
       }
