@@ -120,33 +120,79 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
 
 app.use(express.json({ limit: '1mb' }));
 
+// ── Clerk (Google login) – enabled when keys are configured ──────
+const clerkEnabled = !!(process.env.CLERK_SECRET_KEY && process.env.CLERK_PUBLISHABLE_KEY);
+let clerkGetAuth = null;
+let clerkClient = null;
+if (clerkEnabled) {
+  const clerkExpress = require('@clerk/express');
+  clerkGetAuth = clerkExpress.getAuth;
+  clerkClient = clerkExpress.clerkClient;
+  app.use(clerkExpress.clerkMiddleware());
+  console.log('Clerk auth enabled');
+}
+
+// Cache Clerk userId -> email so we don't hit the Clerk API on every request
+const clerkEmailCache = new Map();
+const CLERK_EMAIL_TTL = 5 * 60 * 1000; // 5 minutes
+
 // ── Admin auth middleware ────────────────────────────────────────
-function requireAdmin(req, res, next) {
-  const auth = req.headers.authorization;
-  if (!auth) return res.status(401).json({ error: 'Unauthorized' });
+// Accepts (in order): legacy admin JWT, legacy API key, Clerk session
+// (Google login) restricted to @re-dry.com accounts.
+async function requireAdmin(req, res, next) {
+  try {
+    const auth = req.headers.authorization;
+    if (!auth) return res.status(401).json({ error: 'Unauthorized' });
 
-  // Try JWT first (Bearer <jwt-token>)
-  if (auth.startsWith('Bearer ') && process.env.JWT_SECRET) {
-    const token = auth.slice(7);
-    try {
-      const payload = jwt.verify(token, process.env.JWT_SECRET);
-      req.adminUser = { id: payload.sub, email: payload.email };
-      return next();
-    } catch (_jwtErr) {
-      // Not a valid JWT – fall through to API key check
+    // Try JWT first (Bearer <jwt-token>)
+    if (auth.startsWith('Bearer ') && process.env.JWT_SECRET) {
+      const token = auth.slice(7);
+      try {
+        const payload = jwt.verify(token, process.env.JWT_SECRET);
+        req.adminUser = { id: payload.sub, email: payload.email };
+        return next();
+      } catch (_jwtErr) {
+        // Not a valid legacy JWT – fall through to API key / Clerk checks
+      }
     }
-  }
 
-  // Fallback: legacy API key
-  if (process.env.ADMIN_API_KEY) {
-    const expected = `Bearer ${process.env.ADMIN_API_KEY}`;
-    if (auth.length === expected.length &&
-        crypto.timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) {
-      return next();
+    // Fallback: legacy API key
+    if (process.env.ADMIN_API_KEY) {
+      const expected = `Bearer ${process.env.ADMIN_API_KEY}`;
+      if (auth.length === expected.length &&
+          crypto.timingSafeEqual(Buffer.from(auth), Buffer.from(expected))) {
+        return next();
+      }
     }
-  }
 
-  return res.status(401).json({ error: 'Unauthorized' });
+    // Clerk session token (Google login)
+    if (clerkEnabled) {
+      const clerkAuth = clerkGetAuth(req);
+      if (clerkAuth && clerkAuth.userId) {
+        let cached = clerkEmailCache.get(clerkAuth.userId);
+        if (!cached || cached.expires < Date.now()) {
+          const user = await clerkClient.users.getUser(clerkAuth.userId);
+          const email = (
+            user.primaryEmailAddress?.emailAddress ||
+            user.emailAddresses?.[0]?.emailAddress ||
+            ''
+          ).toLowerCase();
+          cached = { email, expires: Date.now() + CLERK_EMAIL_TTL };
+          clerkEmailCache.set(clerkAuth.userId, cached);
+        }
+        if (cached.email.endsWith('@re-dry.com')) {
+          req.adminUser = { id: clerkAuth.userId, email: cached.email };
+          return next();
+        }
+        return res.status(403).json({ error: 'Only @re-dry.com accounts are allowed' });
+      }
+    }
+
+    return res.status(401).json({ error: 'Unauthorized' });
+  } catch (err) {
+    console.error('Admin auth error:', err);
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
 }
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);

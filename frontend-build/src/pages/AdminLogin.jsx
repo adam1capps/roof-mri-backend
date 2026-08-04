@@ -1,7 +1,28 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { SignIn, useAuth } from '@clerk/clerk-react'
+import { CLERK_ENABLED } from '../lib/clerkBridge'
 
 const API = import.meta.env.VITE_API_URL || ''
+
+// Only rendered when Clerk is enabled (safe to use Clerk hooks here)
+function GoogleSignIn() {
+  const navigate = useNavigate()
+  const { isSignedIn } = useAuth()
+
+  // Already signed in with Google — go straight to the dashboard
+  useEffect(() => {
+    if (isSignedIn) navigate('/admin')
+  }, [isSignedIn, navigate])
+
+  if (isSignedIn) return null
+
+  return (
+    <div style={{ display: 'flex', justifyContent: 'center', marginTop: 8 }}>
+      <SignIn routing="hash" forceRedirectUrl="/admin" />
+    </div>
+  )
+}
 
 export default function AdminLogin() {
   const navigate = useNavigate()
@@ -11,6 +32,7 @@ export default function AdminLogin() {
   const [success, setSuccess] = useState('')
   const [loading, setLoading] = useState(false)
   const [isSetup, setIsSetup] = useState(false)
+  const [usePassword, setUsePassword] = useState(!CLERK_ENABLED)
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -53,44 +75,64 @@ export default function AdminLogin() {
         <span className="logo">ROOF <span className="accent">MRI</span></span>
         <span className="tagline">Admin Dashboard</span>
       </header>
-      <div className="card" style={{ borderRadius: '0 0 8px 8px' }}>
-        <h2 className="admin-page-title">{isSetup ? 'Create Admin Account' : 'Sign In'}</h2>
-        <form onSubmit={handleSubmit} className="admin-form">
-          {error && <div className="admin-error">{error}</div>}
-          {success && <div className="admin-error" style={{ background: '#f0fdf4', color: '#166534', borderColor: '#bbf7d0' }}>{success}</div>}
-          <div className="admin-field">
-            <label>Email</label>
-            <input
-              type="email"
-              value={email}
-              onChange={e => setEmail(e.target.value)}
-              placeholder="you@re-dry.com"
-              required
-            />
-          </div>
-          <div className="admin-field">
-            <label>{isSetup ? 'Choose Password (10+ characters)' : 'Password'}</label>
-            <input
-              type="password"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              placeholder={isSetup ? 'Choose a password' : 'Enter password'}
-              required
-              minLength={isSetup ? 10 : undefined}
-            />
-          </div>
-          <button type="submit" className="btn btn-primary" disabled={loading}>
-            {loading ? (isSetup ? 'Creating account...' : 'Signing in...') : (isSetup ? 'Create Account' : 'Sign In')}
-          </button>
-        </form>
-        <p style={{ textAlign: 'center', marginTop: 16, fontSize: 14, color: '#64748b' }}>
-          {isSetup ? (
-            <>Already have an account? <a href="#" onClick={e => { e.preventDefault(); setIsSetup(false); setError('') }} style={{ color: '#00bd70' }}>Sign in</a></>
-          ) : (
-            <>First time? <a href="#" onClick={e => { e.preventDefault(); setIsSetup(true); setError('') }} style={{ color: '#00bd70' }}>Create admin account</a></>
+
+      {CLERK_ENABLED && !usePassword ? (
+        <div className="card" style={{ borderRadius: '0 0 8px 8px' }}>
+          <h2 className="admin-page-title">Sign In</h2>
+          <GoogleSignIn />
+          <p style={{ textAlign: 'center', marginTop: 16, fontSize: 13, color: '#94a3b8' }}>
+            <a href="#" onClick={e => { e.preventDefault(); setUsePassword(true); setError('') }} style={{ color: '#64748b' }}>
+              Use password instead
+            </a>
+          </p>
+        </div>
+      ) : (
+        <div className="card" style={{ borderRadius: '0 0 8px 8px' }}>
+          <h2 className="admin-page-title">{isSetup ? 'Create Admin Account' : 'Sign In'}</h2>
+          <form onSubmit={handleSubmit} className="admin-form">
+            {error && <div className="admin-error">{error}</div>}
+            {success && <div className="admin-error" style={{ background: '#f0fdf4', color: '#166534', borderColor: '#bbf7d0' }}>{success}</div>}
+            <div className="admin-field">
+              <label>Email</label>
+              <input
+                type="email"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                placeholder="you@re-dry.com"
+                required
+              />
+            </div>
+            <div className="admin-field">
+              <label>{isSetup ? 'Choose Password (10+ characters)' : 'Password'}</label>
+              <input
+                type="password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                placeholder={isSetup ? 'Choose a password' : 'Enter password'}
+                required
+                minLength={isSetup ? 10 : undefined}
+              />
+            </div>
+            <button type="submit" className="btn btn-primary" disabled={loading}>
+              {loading ? (isSetup ? 'Creating account...' : 'Signing in...') : (isSetup ? 'Create Account' : 'Sign In')}
+            </button>
+          </form>
+          <p style={{ textAlign: 'center', marginTop: 16, fontSize: 14, color: '#64748b' }}>
+            {isSetup ? (
+              <>Already have an account? <a href="#" onClick={e => { e.preventDefault(); setIsSetup(false); setError('') }} style={{ color: '#00bd70' }}>Sign in</a></>
+            ) : (
+              <>First time? <a href="#" onClick={e => { e.preventDefault(); setIsSetup(true); setError('') }} style={{ color: '#00bd70' }}>Create admin account</a></>
+            )}
+          </p>
+          {CLERK_ENABLED && (
+            <p style={{ textAlign: 'center', marginTop: 4, fontSize: 13 }}>
+              <a href="#" onClick={e => { e.preventDefault(); setUsePassword(false); setError('') }} style={{ color: '#00bd70' }}>
+                Sign in with Google instead
+              </a>
+            </p>
           )}
-        </p>
-      </div>
+        </div>
+      )}
     </div>
   )
 }

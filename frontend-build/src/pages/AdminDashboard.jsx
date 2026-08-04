@@ -1,16 +1,13 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { getAuthToken, signOutEverywhere } from '../lib/clerkBridge'
 
 const API = import.meta.env.VITE_API_URL || ''
 
-function getToken() {
-  return localStorage.getItem('roofmri_token')
-}
-
-function authHeaders() {
+async function authHeaders() {
   return {
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${getToken()}`
+    Authorization: `Bearer ${await getAuthToken()}`
   }
 }
 
@@ -79,7 +76,7 @@ function ProposalForm({ onSent }) {
 
       const res = await fetch(`${API}/api/send-proposal`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers: await authHeaders(),
         body: JSON.stringify(body)
       })
       const data = await res.json()
@@ -346,7 +343,7 @@ function InvoiceForm({ onSent }) {
 
       const res = await fetch(`${API}/api/invoices`, {
         method: 'POST',
-        headers: authHeaders(),
+        headers: await authHeaders(),
         body: JSON.stringify(body)
       })
       const data = await res.json()
@@ -365,7 +362,7 @@ function InvoiceForm({ onSent }) {
     try {
       const res = await fetch(`${API}/api/invoices/${invoiceId}/send`, {
         method: 'POST',
-        headers: authHeaders()
+        headers: await authHeaders()
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Failed to send')
@@ -547,7 +544,7 @@ function InvoicesList({ invoices, loading, onRefresh }) {
     try {
       const res = await fetch(`${API}/api/invoices/${id}/send`, {
         method: 'POST',
-        headers: authHeaders()
+        headers: await authHeaders()
       })
       if (!res.ok) {
         const data = await res.json()
@@ -646,7 +643,7 @@ export default function AdminDashboard() {
   const fetchProposals = useCallback(async () => {
     try {
       const res = await fetch(`${API}/api/proposals`, {
-        headers: { Authorization: `Bearer ${getToken()}` }
+        headers: await authHeaders()
       })
       if (res.status === 401) {
         localStorage.removeItem('roofmri_token')
@@ -665,7 +662,7 @@ export default function AdminDashboard() {
   const fetchInvoices = useCallback(async () => {
     try {
       const res = await fetch(`${API}/api/invoices`, {
-        headers: { Authorization: `Bearer ${getToken()}` }
+        headers: await authHeaders()
       })
       if (res.status === 401) return
       const data = await res.json()
@@ -678,32 +675,41 @@ export default function AdminDashboard() {
   }, [])
 
   useEffect(() => {
-    // Verify auth
-    const token = getToken()
-    if (!token) { navigate('/admin/login'); return }
+    // Verify auth (Clerk Google session or legacy password token)
+    let cancelled = false
+    async function verifyAuth() {
+      const token = await getAuthToken()
+      if (cancelled) return
+      if (!token) { navigate('/admin/login'); return }
 
-    fetch(`${API}/api/admin/me`, {
-      headers: { Authorization: `Bearer ${token}` }
-    }).then(res => {
-      if (!res.ok) {
-        localStorage.removeItem('roofmri_token')
-        navigate('/admin/login')
-        return
+      try {
+        const res = await fetch(`${API}/api/admin/me`, {
+          headers: { Authorization: `Bearer ${token}` }
+        })
+        if (cancelled) return
+        if (!res.ok) {
+          localStorage.removeItem('roofmri_token')
+          navigate('/admin/login')
+          return
+        }
+        const data = await res.json()
+        if (!cancelled && data?.email) setAdminEmail(data.email)
+      } catch {
+        if (!cancelled) {
+          localStorage.removeItem('roofmri_token')
+          navigate('/admin/login')
+        }
       }
-      return res.json()
-    }).then(data => {
-      if (data?.email) setAdminEmail(data.email)
-    }).catch(() => {
-      localStorage.removeItem('roofmri_token')
-      navigate('/admin/login')
-    })
+    }
+    verifyAuth()
 
     fetchProposals()
     fetchInvoices()
+    return () => { cancelled = true }
   }, [navigate, fetchProposals, fetchInvoices])
 
-  function handleLogout() {
-    localStorage.removeItem('roofmri_token')
+  async function handleLogout() {
+    await signOutEverywhere()
     navigate('/admin/login')
   }
 
