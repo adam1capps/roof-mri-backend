@@ -814,8 +814,8 @@ function buildPricingNoticeEmail(p, proposalUrl) {
 <table width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);">
 
 <!-- Logo -->
-<tr><td style="padding:28px 28px 20px 28px;text-align:center;border-bottom:4px solid #00bd70;">
-  <img src="${EMAIL_LOGO_URL}" width="120" height="116" alt="Roof MRI" style="display:inline-block;width:120px;height:auto;border:0;">
+<tr><td style="padding:32px 28px 24px 28px;text-align:center;border-bottom:4px solid #1B2A4A;">
+  <img src="${EMAIL_LOGO_URL}" width="200" height="106" alt="Roof MRI" style="display:inline-block;width:200px;height:auto;border:0;">
 </td></tr>
 
 <!-- Greeting -->
@@ -830,12 +830,14 @@ function buildPricingNoticeEmail(p, proposalUrl) {
 
 <!-- Price box -->
 <tr><td style="padding:20px 28px 8px 28px;">
-  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;">
-    <tr><td style="padding:20px 24px;text-align:center;">
-      <p style="margin:0 0 6px 0;font-size:12px;font-weight:700;color:#15803d;text-transform:uppercase;letter-spacing:1px;">Your locked-in price</p>
-      <p style="margin:0;font-size:32px;font-weight:700;color:#1B2A4A;line-height:1.2;">$10,000</p>
-      <p style="margin:6px 0 0 0;font-size:13px;color:#475569;">Professional package &middot; <span style="text-decoration:line-through;color:#94a3b8;">$12,500</span> starting Jan&nbsp;1</p>
-      <p style="margin:10px 0 0 0;font-size:13px;color:#15803d;font-weight:600;">Honored through December 31, 2026</p>
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#1B2A4A;border-radius:8px;">
+    <tr><td style="padding:24px 24px;text-align:center;">
+      <p style="margin:0 0 8px 0;font-size:12px;font-weight:700;color:#cbd5e1;text-transform:uppercase;letter-spacing:2px;">Your locked-in price</p>
+      <p style="margin:0;font-size:34px;font-weight:700;color:#ffffff;line-height:1.2;">$10,000</p>
+      <p style="margin:8px 0 0 0;font-size:13px;color:#cbd5e1;">Professional package &middot; <span style="text-decoration:line-through;color:#94a3b8;">$12,500</span> starting Jan&nbsp;1</p>
+      <table cellpadding="0" cellspacing="0" border="0" style="margin:14px auto 0 auto;"><tr><td style="border-top:1px solid #3b4d73;padding-top:12px;">
+        <p style="margin:0;font-size:13px;color:#ffffff;font-weight:600;letter-spacing:0.5px;">Honored through December 31, 2026</p>
+      </td></tr></table>
     </td></tr>
   </table>
 </td></tr>
@@ -847,7 +849,7 @@ function buildPricingNoticeEmail(p, proposalUrl) {
 <!-- CTA -->
 <tr><td style="padding:24px 28px 12px 28px;text-align:center;">
   <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
-    <tr><td style="background:#00bd70;border-radius:8px;padding:16px 48px;text-align:center;">
+    <tr><td style="background:#1B2A4A;border-radius:6px;padding:16px 48px;text-align:center;">
       <a href="${proposalUrl}" style="color:#ffffff;font-size:17px;font-weight:700;text-decoration:none;display:block;">View Your Proposal</a>
     </td></tr>
   </table>
