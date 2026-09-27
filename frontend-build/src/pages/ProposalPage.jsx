@@ -9,8 +9,8 @@ const API = import.meta.env.VITE_API_URL || ''
 
 const TIER_NAMES = { professional: 'Professional', regional: 'Regional', enterprise: 'Enterprise' }
 const TIER_DAYS = { professional: '1 Day', regional: '2 Days', enterprise: '4 Days' }
-const TIER_PRICES_DISPLAY = { professional: '$10K', regional: '$35K', enterprise: '$75K' }
-const FIXED_PRICES = { professional: 10000, regional: 35000, enterprise: 75000 }
+const TIER_PRICES_DISPLAY = { professional: '$12.5K', regional: '$35K', enterprise: '$75K' }
+const FIXED_PRICES = { professional: 12500, regional: 35000, enterprise: 75000 }
 
 function fmt(n) { return '$' + Number(n).toLocaleString('en-US') }
 

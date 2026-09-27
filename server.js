@@ -473,29 +473,28 @@ async function initDB() {
   await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS deposit_paid BOOLEAN DEFAULT false`);
   await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS deposit_stripe_session_id TEXT`);
 
-  // Fixed tier pricing: normalize every proposal to $10K/$35K/$75K.
-  // Skip total_price on paid/processing proposals so financial records
-  // keep matching what was actually charged.
+  // Fixed tier pricing: keep every unsigned proposal on the current
+  // FIXED_TIER_PRICES. Signed proposals keep the price the client agreed
+  // to, and paid/processing ones keep what was actually charged.
+  const P = FIXED_TIER_PRICES;
   await pool.query(`
     UPDATE proposals SET
-      professional_price = 10000,
-      regional_price = 35000,
-      enterprise_price = 75000
-  `);
-  await pool.query(`
-    UPDATE proposals SET
+      professional_price = $1,
+      regional_price = $2,
+      enterprise_price = $3,
       tier_price = CASE COALESCE(selected_tier, tier)
-        WHEN 'professional' THEN 10000
-        WHEN 'regional' THEN 35000
-        WHEN 'enterprise' THEN 75000
+        WHEN 'professional' THEN $1
+        WHEN 'regional' THEN $2
+        WHEN 'enterprise' THEN $3
         ELSE tier_price END,
       total_price = CASE COALESCE(selected_tier, tier)
-        WHEN 'professional' THEN 10000
-        WHEN 'regional' THEN 35000
-        WHEN 'enterprise' THEN 75000
+        WHEN 'professional' THEN $1
+        WHEN 'regional' THEN $2
+        WHEN 'enterprise' THEN $3
         ELSE total_price END
-    WHERE COALESCE(payment_status, 'unpaid') NOT IN ('paid', 'processing')
-  `);
+    WHERE COALESCE(status, 'sent') NOT IN ('signed', 'signed_pay_later')
+      AND COALESCE(payment_status, 'unpaid') NOT IN ('paid', 'processing')
+  `, [P.professional, P.regional, P.enterprise]);
 
   console.log('Database initialized');
 }
@@ -506,7 +505,7 @@ function generateId() {
 }
 
 // ── Fixed tier pricing – the only prices the system will ever use ──
-const FIXED_TIER_PRICES = { professional: 10000, regional: 35000, enterprise: 75000 };
+const FIXED_TIER_PRICES = { professional: 12500, regional: 35000, enterprise: 75000 };
 
 // Pay-later flow constants
 const DEPOSIT_AMOUNT = 100;            // $100 deposit for "Sign Now, Pay Later"
@@ -1584,6 +1583,59 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('Error:', err.response ? err.response.body : err);
     res.status(500).json({ error: 'Failed to send proposal' });
+  }
+});
+
+// ── POST /api/proposals/:id/resend ────────────────────────────────
+// Re-send an existing proposal email (same link, fresh PDF) – admin only.
+// Optional body.email sends it to a different address instead.
+app.post('/api/proposals/:id/resend', requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Proposal not found' });
+    const p = rows[0];
+
+    const toEmail = req.body?.email ? String(req.body.email).trim() : p.email;
+    if (!isValidEmail(toEmail)) return res.status(400).json({ error: 'Invalid email address' });
+
+    const baseUrl = process.env.PROPOSAL_BASE_URL || 'https://proposals.roof-mri.com';
+    const proposalUrl = `${baseUrl}/p/${p.id}`;
+    const data = {
+      contactName: p.contact_name,
+      company: p.company,
+      email: toEmail,
+      tier: p.tier,
+      extraTrainees: p.extra_trainees,
+      extraKits: p.extra_kits,
+      tracks: p.tracks || [],
+      videography: p.videography,
+      onRoofDay: p.on_roof_day,
+      totalPrice: p.total_price,
+      letClientChoose: p.let_client_choose,
+      vimeoUrl: p.vimeo_url,
+      proposalNum: p.proposal_num,
+    };
+
+    const html = buildEmail(data, proposalUrl);
+    const pdfBuffer = await buildProposalPdf(data, proposalUrl);
+    await sgMail.send({
+      to: toEmail,
+      from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
+      replyTo: { email: 'adam@re-dry.com', name: 'Adam Capps' },
+      subject: `Roof MRI Training Proposal for ${p.company}`,
+      html,
+      attachments: [{
+        content: pdfBuffer.toString('base64'),
+        filename: `Roof-MRI-Proposal-${p.company.replace(/[^a-zA-Z0-9]/g, '-')}.pdf`,
+        type: 'application/pdf',
+        disposition: 'attachment',
+      }],
+    });
+
+    res.json({ success: true, proposalUrl, message: `Proposal re-sent to ${toEmail}` });
+  } catch (err) {
+    console.error('Resend proposal error:', err.response ? err.response.body : err);
+    res.status(500).json({ error: 'Failed to resend proposal' });
   }
 });
 

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-const FIXED_PRICES = { professional: 10000, regional: 35000, enterprise: 75000 }
+const FIXED_PRICES = { professional: 12500, regional: 35000, enterprise: 75000 }
 
 const TIER_INFO = {
   professional: { name: 'Professional', desc: '1 day, up to 3 trainees, 1 Recon Kit' },

@@ -12,7 +12,7 @@ async function authHeaders() {
 }
 
 // ── Proposal Form ──────────────────────────────────────────────────
-const FIXED_PRICE_LABELS = { professional: '$10,000', regional: '$35,000', enterprise: '$75,000' }
+const FIXED_PRICE_LABELS = { professional: '$12,500', regional: '$35,000', enterprise: '$75,000' }
 
 function ProposalForm({ onSent }) {
   const [form, setForm] = useState({
@@ -37,7 +37,7 @@ function ProposalForm({ onSent }) {
     setSending(true)
 
     try {
-      // Pricing is fixed at $10K / $35K / $75K – the server enforces it,
+      // Pricing is fixed at $12.5K / $35K / $75K – the server enforces it,
       // so the form only sends who the proposal is for and which tier (if any)
       const body = {
         contactName: form.contactName,
@@ -111,7 +111,7 @@ function ProposalForm({ onSent }) {
           <label>Package Tier</label>
           <select value={form.tier} onChange={set('tier')}>
             <option value="">Let client choose their package</option>
-            <option value="professional">Professional — $10,000 (3 trainees, 1 kit)</option>
+            <option value="professional">Professional — $12,500 (3 trainees, 1 kit)</option>
             <option value="regional">Regional — $35,000 (10 trainees, 2 kits)</option>
             <option value="enterprise">Enterprise — $75,000 (25 trainees, 4 kits)</option>
           </select>
@@ -121,7 +121,7 @@ function ProposalForm({ onSent }) {
           background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8,
           padding: '12px 16px', marginBottom: 4, fontSize: 13, color: '#64748b'
         }}>
-          Pricing is fixed: <strong style={{ color: '#1B2A4A' }}>Professional $10,000</strong>{' · '}
+          Pricing is fixed: <strong style={{ color: '#1B2A4A' }}>Professional $12,500</strong>{' · '}
           <strong style={{ color: '#1B2A4A' }}>Regional $35,000</strong>{' · '}
           <strong style={{ color: '#1B2A4A' }}>Enterprise $75,000</strong>
           {form.tier && <> — this proposal will be sent at <strong style={{ color: '#00a35f' }}>{FIXED_PRICE_LABELS[form.tier]}</strong></>}
@@ -141,84 +141,153 @@ function ProposalForm({ onSent }) {
 }
 
 // ── Proposals List ─────────────────────────────────────────────────
-function ProposalsList({ proposals, loading }) {
+function proposalLink(id) {
+  return `${window.location.origin}/p/${id}`
+}
+
+function fmtDate(value) {
+  if (!value) return null
+  // DATE columns arrive as midnight UTC; format in UTC so the day doesn't shift
+  return new Date(value).toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function ProposalRow({ p }) {
+  const [copied, setCopied] = useState(false)
+  const [resending, setResending] = useState(false)
+  const [message, setMessage] = useState(null)
+
+  const isPayLater = p.status === 'signed_pay_later'
+  const isSigned = p.status === 'signed' || isPayLater
+  const overdue = isPayLater && p.payment_status !== 'paid' && p.payment_due_date &&
+    new Date(p.payment_due_date) < new Date()
+  const link = proposalLink(p.id)
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(link)
+    } catch {
+      // Clipboard API unavailable (older browsers / insecure context)
+      window.prompt('Copy this proposal link:', link)
+    }
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  async function resend() {
+    const to = window.prompt('Resend this proposal to:', p.email)
+    if (!to) return
+    setResending(true)
+    setMessage(null)
+    try {
+      const res = await fetch(`${API}/api/proposals/${p.id}/resend`, {
+        method: 'POST',
+        headers: await authHeaders(),
+        body: JSON.stringify({ email: to.trim() })
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || 'Failed to resend')
+      setMessage({ ok: true, text: `Sent to ${to.trim()}` })
+    } catch (err) {
+      setMessage({ ok: false, text: err.message })
+    } finally {
+      setResending(false)
+    }
+  }
+
+  const statusLabel = isPayLater ? 'Signed · pay later' : isSigned ? 'Signed' : p.opened_at ? 'Opened' : 'Sent'
+
+  return (
+    <div className="proposal-row">
+      <div className="proposal-row-main">
+        <div className="proposal-row-title">
+          <strong>{p.company}</strong>
+          {p.proposal_num && <span className="proposal-row-num">#{p.proposal_num}</span>}
+        </div>
+        <div className="proposal-row-meta">
+          {p.contact_name} · {p.email}
+        </div>
+        <div className="proposal-row-meta">
+          Sent {fmtDate(p.created_at)}
+          {p.tier && <> · <span style={{ textTransform: 'capitalize' }}>{p.tier}</span></>}
+          {p.total_price ? <> · ${Number(p.total_price).toLocaleString()}</> : null}
+          {p.open_count > 0 && <> · viewed {p.open_count}×</>}
+        </div>
+        <div className="proposal-row-badges">
+          <span className={`admin-badge badge-${p.status}`}>{statusLabel}</span>
+          <span className={`admin-badge badge-${p.payment_status}`}>{p.payment_status}</span>
+          {isPayLater && (
+            <span style={{ fontSize: 12, color: p.deposit_paid ? '#00a35f' : '#b45309' }}>
+              {p.deposit_paid ? '$100 deposit paid' : 'Deposit pending'}
+            </span>
+          )}
+          {p.requested_training_week && (
+            <span style={{ fontSize: 12, color: '#64748b' }}>Week of {fmtDate(p.requested_training_week)}</span>
+          )}
+          {p.payment_due_date && p.payment_status !== 'paid' && (
+            <span style={{ fontSize: 12, color: overdue ? '#dc2626' : '#64748b', fontWeight: overdue ? 700 : 400 }}>
+              {overdue ? 'Overdue since' : 'Balance due'} {fmtDate(p.payment_due_date)}
+            </span>
+          )}
+        </div>
+        {message && (
+          <div style={{ fontSize: 12, marginTop: 6, color: message.ok ? '#00a35f' : '#dc2626' }}>{message.text}</div>
+        )}
+      </div>
+      <div className="proposal-row-actions">
+        <a href={link} target="_blank" rel="noopener noreferrer" className="btn-small">Open</a>
+        <button type="button" className="btn-small" onClick={copyLink}>{copied ? 'Copied ✓' : 'Copy link'}</button>
+        <button type="button" className="btn-small" onClick={resend} disabled={resending}>
+          {resending ? 'Sending…' : 'Resend'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function ProposalsList({ proposals, loading, error, onRetry }) {
+  const [query, setQuery] = useState('')
+
   if (loading) {
     return (
       <div className="card">
-        <h3 className="section-title">All Proposals</h3>
+        <h3 className="section-title">Sent Proposals</h3>
         <div className="loading"><div className="spinner"></div></div>
       </div>
     )
   }
 
+  const q = query.trim().toLowerCase()
+  const shown = q
+    ? proposals.filter(p => [p.company, p.contact_name, p.email, p.proposal_num]
+        .some(v => v && String(v).toLowerCase().includes(q)))
+    : proposals
+
   return (
     <div className="card">
-      <h3 className="section-title">All Proposals ({proposals.length})</h3>
-      {proposals.length === 0 ? (
+      <h3 className="section-title">Sent Proposals ({proposals.length})</h3>
+      {error ? (
+        <div className="admin-error">
+          Couldn{'’'}t load proposals: {error}{' '}
+          <button type="button" className="btn-small" onClick={onRetry}>Retry</button>
+        </div>
+      ) : proposals.length === 0 ? (
         <p style={{ color: '#64748b', fontSize: 14 }}>No proposals sent yet.</p>
       ) : (
-        <div className="admin-table-wrap">
-          <table className="admin-table">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Company</th>
-                <th>Contact</th>
-                <th>Tier</th>
-                <th>Total</th>
-                <th>Status</th>
-                <th>Payment</th>
-                <th>Training Week</th>
-                <th>Due</th>
-                <th>Link</th>
-              </tr>
-            </thead>
-            <tbody>
-              {proposals.map(p => {
-                const isPayLater = p.status === 'signed_pay_later'
-                const overdue = isPayLater && p.payment_status !== 'paid' && p.payment_due_date &&
-                  new Date(p.payment_due_date) < new Date()
-                return (
-                  <tr key={p.id}>
-                    <td>{new Date(p.created_at).toLocaleDateString()}</td>
-                    <td>{p.company}</td>
-                    <td>{p.contact_name}</td>
-                    <td style={{ textTransform: 'capitalize' }}>{p.tier || '—'}</td>
-                    <td>{p.total_price ? `$${Number(p.total_price).toLocaleString()}` : '—'}</td>
-                    <td>
-                      <span className={`admin-badge badge-${p.status}`}>
-                        {isPayLater ? 'signed · pay later' : p.status}
-                      </span>
-                      {isPayLater && (
-                        <div style={{ fontSize: 11, color: p.deposit_paid ? '#00a35f' : '#b45309', marginTop: 2 }}>
-                          {p.deposit_paid ? '$100 deposit paid' : 'deposit pending'}
-                        </div>
-                      )}
-                    </td>
-                    <td>
-                      <span className={`admin-badge badge-${p.payment_status}`}>{p.payment_status}</span>
-                    </td>
-                    <td>
-                      {p.requested_training_week
-                        ? new Date(p.requested_training_week).toLocaleDateString()
-                        : '—'}
-                    </td>
-                    <td style={overdue ? { color: '#dc2626', fontWeight: 700 } : {}}>
-                      {p.payment_due_date && p.payment_status !== 'paid'
-                        ? new Date(p.payment_due_date).toLocaleDateString() + (overdue ? ' !' : '')
-                        : '—'}
-                    </td>
-                    <td>
-                      <a href={`/p/${p.id}`} target="_blank" rel="noopener noreferrer" className="admin-link">
-                        View
-                      </a>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
+        <>
+          <div className="admin-field" style={{ marginBottom: 12 }}>
+            <input
+              type="search"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search company, contact, or email"
+            />
+          </div>
+          {shown.length === 0 ? (
+            <p style={{ color: '#64748b', fontSize: 14 }}>No proposals match {'“'}{query}{'”'}.</p>
+          ) : (
+            shown.map(p => <ProposalRow key={p.id} p={p} />)
+          )}
+        </>
       )}
     </div>
   )
@@ -581,14 +650,16 @@ export default function AdminDashboard() {
   const navigate = useNavigate()
   const [proposals, setProposals] = useState([])
   const [loadingProposals, setLoadingProposals] = useState(true)
+  const [proposalsError, setProposalsError] = useState(null)
   const [invoices, setInvoices] = useState([])
   const [loadingInvoices, setLoadingInvoices] = useState(true)
   const [adminEmail, setAdminEmail] = useState('')
   const [activeTab, setActiveTab] = useState('proposals') // 'proposals' or 'invoices'
 
   const fetchProposals = useCallback(async () => {
+    setProposalsError(null)
     try {
-      const res = await fetch(`${API}/api/proposals`, {
+      const res = await fetch(`${API}/api/proposals?limit=200`, {
         headers: await authHeaders()
       })
       if (res.status === 401) {
@@ -596,10 +667,11 @@ export default function AdminDashboard() {
         navigate('/admin/login')
         return
       }
-      const data = await res.json()
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
       setProposals(Array.isArray(data) ? data : data.proposals || [])
-    } catch {
-      // silently fail — list will just be empty
+    } catch (err) {
+      setProposalsError(err.message || 'Network error')
     } finally {
       setLoadingProposals(false)
     }
@@ -699,7 +771,7 @@ export default function AdminDashboard() {
       {activeTab === 'proposals' && (
         <>
           <ProposalForm onSent={fetchProposals} />
-          <ProposalsList proposals={proposals} loading={loadingProposals} />
+          <ProposalsList proposals={proposals} loading={loadingProposals} error={proposalsError} onRetry={fetchProposals} />
         </>
       )}
 

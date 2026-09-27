@@ -1672,6 +1672,45 @@ span.included {
   font-weight: 600;
 }
 
+/* Sent proposals list */
+.proposal-row {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 14px 0;
+  border-top: 1px solid var(--gray100);
+}
+.proposal-row-main { min-width: 0; flex: 1; }
+.proposal-row-title { font-size: 15px; color: var(--navy); overflow-wrap: anywhere; }
+.proposal-row-num { margin-left: 8px; font-size: 12px; color: var(--gray500); }
+.proposal-row-meta { font-size: 13px; color: var(--gray600); margin-top: 3px; overflow-wrap: anywhere; }
+.proposal-row-badges { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-top: 8px; }
+.proposal-row-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.btn-small {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--navy);
+  background: var(--white);
+  border: 1px solid var(--gray200);
+  border-radius: 6px;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.btn-small:hover { border-color: var(--green); color: var(--green-dark); }
+.btn-small:disabled { opacity: 0.6; cursor: default; }
+@media (max-width: 640px) {
+  .proposal-row { flex-direction: column; gap: 10px; }
+  .proposal-row-actions { width: 100%; }
+  .proposal-row-actions .btn-small { flex: 1; padding: 10px 8px; }
+}
+
 /* Invoice line items.
    Grid with minmax(0,…) tracks so the inputs can shrink — a plain flex
    row lets each input hold its ~177px intrinsic width, which forces the

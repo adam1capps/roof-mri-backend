@@ -99,7 +99,7 @@ export default function ComparisonTable() {
             <div className="features-label">Features</div>
             <div className="tier-col">
               <div className="tier-col-name">Professional</div>
-              <div className="tier-col-price">$10K</div>
+              <div className="tier-col-price">$12.5K</div>
             </div>
             <div className="tier-col regional">
               <div className="tier-col-name">Regional</div>

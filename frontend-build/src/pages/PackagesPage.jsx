@@ -5,7 +5,7 @@ const TIERS = [
     key: 'professional',
     name: 'Professional',
     tag: 'Small Teams',
-    price: '$10K',
+    price: '$12.5K',
     priceSub: 'one-time',
     trainees: 3,
     kits: 1,
