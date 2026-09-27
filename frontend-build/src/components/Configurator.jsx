@@ -39,7 +39,9 @@ function ChkSvg() {
   )
 }
 
-export default function Configurator({ onConfirm, onClose, submitting }) {
+export default function Configurator({ prices, onConfirm, onClose, submitting }) {
+  // Per-proposal prices from the server (a price-locked proposal shows $10,000)
+  const PRICES = { ...FIXED_PRICES, ...(prices || {}) }
   const [tier, setTier] = useState(null)
   const [step, setStep] = useState('select')
   const [error, setError] = useState(null)
@@ -96,7 +98,7 @@ export default function Configurator({ onConfirm, onClose, submitting }) {
                       <span className="ctier-name">{tc.name}</span>
                       <span className="ctier-desc">{tc.desc}</span>
                     </div>
-                    <span className="config-tier-right">{fmt(FIXED_PRICES[key])}</span>
+                    <span className="config-tier-right">{fmt(PRICES[key])}</span>
                   </div>
                 ))}
               </div>
@@ -110,7 +112,7 @@ export default function Configurator({ onConfirm, onClose, submitting }) {
               <div className="config-summary-items">
                 <div className="config-sum-line">
                   <span className="csl-label">{TIER_INFO[tier].name} Package</span>
-                  <span className="csl-value">{fmt(FIXED_PRICES[tier])}</span>
+                  <span className="csl-value">{fmt(PRICES[tier])}</span>
                 </div>
                 {TIER_DETAILS[tier].map((detail, i) => (
                   <div className="config-sum-line" key={i}>
@@ -120,7 +122,7 @@ export default function Configurator({ onConfirm, onClose, submitting }) {
                 ))}
                 <div className="config-sum-line total-line">
                   <span className="csl-label">Total Investment</span>
-                  <span className="csl-value">{fmt(FIXED_PRICES[tier])}</span>
+                  <span className="csl-value">{fmt(PRICES[tier])}</span>
                 </div>
               </div>
             </div>

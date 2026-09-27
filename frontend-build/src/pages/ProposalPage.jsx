@@ -9,8 +9,12 @@ const API = import.meta.env.VITE_API_URL || ''
 
 const TIER_NAMES = { professional: 'Professional', regional: 'Regional', enterprise: 'Enterprise' }
 const TIER_DAYS = { professional: '1 Day', regional: '2 Days', enterprise: '4 Days' }
-const TIER_PRICES_DISPLAY = { professional: '$12.5K', regional: '$35K', enterprise: '$75K' }
 const FIXED_PRICES = { professional: 12500, regional: 35000, enterprise: 75000 }
+
+function fmtShort(n) {
+  const k = Number(n) / 1000
+  return '$' + (Number.isInteger(k) ? k : k.toFixed(1)) + 'K'
+}
 
 function fmt(n) { return '$' + Number(n).toLocaleString('en-US') }
 
@@ -304,7 +308,13 @@ export default function ProposalPage() {
   const hasPrice = proposal.total_price != null && Number(proposal.total_price) > 0
   const needsConfiguration = proposal.let_client_choose && !isConfigured
   const selectedTier = proposal.selected_tier || proposal.tier
-  const totalPrice = Number(proposal.total_price) || (selectedTier ? FIXED_PRICES[selectedTier] : 0)
+  // Server-provided per-tier prices (a price-locked proposal carries $10,000)
+  const tierPrices = {
+    professional: Number(proposal.professional_price) || FIXED_PRICES.professional,
+    regional: Number(proposal.regional_price) || FIXED_PRICES.regional,
+    enterprise: Number(proposal.enterprise_price) || FIXED_PRICES.enterprise,
+  }
+  const totalPrice = Number(proposal.total_price) || (selectedTier ? tierPrices[selectedTier] : 0)
   const balanceAfterDeposit = totalPrice - 100
   const proposalDate = proposal.created_at
     ? new Date(proposal.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
@@ -374,7 +384,7 @@ export default function ProposalPage() {
                       <span className="tier-days">{TIER_DAYS[key]}</span>
                     </div>
                     <div className="tier-price-row">
-                      <span className="tier-price">{TIER_PRICES_DISPLAY[key]}</span>
+                      <span className="tier-price">{fmtShort(tierPrices[key])}</span>
                       <span className="tier-price-sub">one-time</span>
                     </div>
                     <p className="tier-desc">{TIER_DESCS[key]}</p>
@@ -767,6 +777,7 @@ export default function ProposalPage() {
       {/* Configurator Modal */}
       {showConfigurator && (
         <Configurator
+          prices={tierPrices}
           onConfirm={handleConfigure}
           onClose={() => setShowConfigurator(false)}
           submitting={configuring}

@@ -473,28 +473,17 @@ async function initDB() {
   await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS deposit_paid BOOLEAN DEFAULT false`);
   await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS deposit_stripe_session_id TEXT`);
 
-  // Fixed tier pricing: keep every unsigned proposal on the current
-  // FIXED_TIER_PRICES. Signed proposals keep the price the client agreed
-  // to, and paid/processing ones keep what was actually charged.
-  const P = FIXED_TIER_PRICES;
-  await pool.query(`
-    UPDATE proposals SET
-      professional_price = $1,
-      regional_price = $2,
-      enterprise_price = $3,
-      tier_price = CASE COALESCE(selected_tier, tier)
-        WHEN 'professional' THEN $1
-        WHEN 'regional' THEN $2
-        WHEN 'enterprise' THEN $3
-        ELSE tier_price END,
-      total_price = CASE COALESCE(selected_tier, tier)
-        WHEN 'professional' THEN $1
-        WHEN 'regional' THEN $2
-        WHEN 'enterprise' THEN $3
-        ELSE total_price END
-    WHERE COALESCE(status, 'sent') NOT IN ('signed', 'signed_pay_later')
-      AND COALESCE(payment_status, 'unpaid') NOT IN ('paid', 'processing')
-  `, [P.professional, P.regional, P.enterprise]);
+  // Price lock for proposals sent before the $12,500 change (see PRICE_LOCK_CUTOFF)
+  await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS price_honored_until DATE`);
+  await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS pricing_notice_sent_at TIMESTAMPTZ`);
+  await pool.query(
+    `UPDATE proposals SET price_honored_until = $1
+     WHERE created_at < $2 AND price_honored_until IS NULL`,
+    [PRICE_HONOR_THROUGH, PRICE_LOCK_CUTOFF]
+  );
+
+  // Keep every unsigned, unpaid proposal on its current fixed prices
+  await pool.query(`UPDATE proposals SET ${REPRICE_SET_SQL} WHERE ${REPRICEABLE_SQL}`);
 
   console.log('Database initialized');
 }
@@ -506,6 +495,53 @@ function generateId() {
 
 // ── Fixed tier pricing – the only prices the system will ever use ──
 const FIXED_TIER_PRICES = { professional: 12500, regional: 35000, enterprise: 75000 };
+
+// Price lock: proposals sent before the $12,500 change keep the old
+// $10,000 Professional price through Dec 31, 2026 (Central time), as
+// promised in the pricing-change notice. They're flagged by the
+// price_honored_until column (set once at startup for older proposals).
+const LEGACY_PROFESSIONAL_PRICE = 10000;
+const PRICE_HONOR_THROUGH = '2026-12-31';
+const PRICE_LOCK_CUTOFF = '2026-09-27T05:00:00Z'; // proposals created before this are grandfathered
+const PRICE_TZ = 'America/Chicago';
+
+// SQL expression: a proposals row's current Professional price
+const PRO_PRICE_SQL = `(CASE WHEN price_honored_until IS NOT NULL
+    AND (NOW() AT TIME ZONE '${PRICE_TZ}')::date <= price_honored_until
+  THEN ${LEGACY_PROFESSIONAL_PRICE} ELSE ${FIXED_TIER_PRICES.professional} END)`;
+
+// SQL expression: current price for the row's selected tier
+function currentTierPriceSql(fallbackColumn) {
+  return `(CASE COALESCE(selected_tier, tier)
+    WHEN 'professional' THEN ${PRO_PRICE_SQL}
+    WHEN 'regional' THEN ${FIXED_TIER_PRICES.regional}
+    WHEN 'enterprise' THEN ${FIXED_TIER_PRICES.enterprise}
+    ELSE ${fallbackColumn} END)`;
+}
+
+// SET clause that puts a proposal on its current prices
+const REPRICE_SET_SQL = `
+  professional_price = ${PRO_PRICE_SQL},
+  regional_price = ${FIXED_TIER_PRICES.regional},
+  enterprise_price = ${FIXED_TIER_PRICES.enterprise},
+  tier_price = ${currentTierPriceSql('tier_price')},
+  total_price = ${currentTierPriceSql('total_price')}`;
+
+// Only unsigned, unpaid proposals follow price changes. Signed ones keep
+// the price the client agreed to; paid ones keep what was charged.
+const REPRICEABLE_SQL = `COALESCE(status, 'sent') NOT IN ('signed', 'signed_pay_later')
+  AND COALESCE(payment_status, 'unpaid') NOT IN ('paid', 'processing')`;
+
+// Current per-tier prices for a proposal row (JS mirror of PRO_PRICE_SQL)
+function tierPricesFor(proposal) {
+  const until = proposal && proposal.price_honored_until;
+  if (until) {
+    const untilStr = until instanceof Date ? until.toISOString().slice(0, 10) : String(until).slice(0, 10);
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: PRICE_TZ }); // YYYY-MM-DD
+    if (today <= untilStr) return { ...FIXED_TIER_PRICES, professional: LEGACY_PROFESSIONAL_PRICE };
+  }
+  return FIXED_TIER_PRICES;
+}
 
 // Pay-later flow constants
 const DEPOSIT_AMOUNT = 100;            // $100 deposit for "Sign Now, Pay Later"
@@ -759,6 +795,84 @@ ${letClientChoose ? `
 </td></tr></table>
 </body></html>`;
 }
+
+// ── Pricing-change notice email ─────────────────────────────────
+// Sent once to clients holding an unsigned proposal from before the
+// $12,500 change: their $10,000 Professional price is honored through
+// Dec 31, 2026.
+const EMAIL_LOGO_URL = `${process.env.PROPOSAL_BASE_URL || 'https://proposals.roof-mri.com'}/roof-mri-logo.png`;
+
+function buildPricingNoticeEmail(p, proposalUrl) {
+  const firstName = escapeHtml((p.contact_name || '').split(' ')[0] || 'there');
+  const company = escapeHtml(p.company);
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif;">
+<div style="display:none;max-height:0;overflow:hidden;">Your $10,000 price is locked in through December 31. Pricing moves to $12,500 on January 1.</div>
+<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f1f5f9;">
+<tr><td align="center" style="padding:24px 12px;">
+<table width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);">
+
+<!-- Logo -->
+<tr><td style="padding:28px 28px 20px 28px;text-align:center;border-bottom:4px solid #00bd70;">
+  <img src="${EMAIL_LOGO_URL}" width="120" height="116" alt="Roof MRI" style="display:inline-block;width:120px;height:auto;border:0;">
+</td></tr>
+
+<!-- Greeting -->
+<tr><td style="padding:28px 28px 8px 28px;">
+  <p style="margin:0;font-size:17px;color:#1B2A4A;line-height:1.5;">Hi ${firstName},</p>
+</td></tr>
+
+<tr><td style="padding:8px 28px 8px 28px;">
+  <p style="margin:0 0 14px 0;font-size:15px;color:#475569;line-height:1.7;">I wanted to give you a heads-up before it happens: starting <strong style="color:#1B2A4A;">January 1, 2027</strong>, the price of our Professional certification training will go from $10,000 to $12,500.</p>
+  <p style="margin:0;font-size:15px;color:#475569;line-height:1.7;">Because you already have a proposal from us for <strong style="color:#1B2A4A;">${company}</strong>, we'll honor the $10,000 price until <strong style="color:#1B2A4A;">December 31, 2026</strong>.</p>
+</td></tr>
+
+<!-- Price box -->
+<tr><td style="padding:20px 28px 8px 28px;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;">
+    <tr><td style="padding:20px 24px;text-align:center;">
+      <p style="margin:0 0 6px 0;font-size:12px;font-weight:700;color:#15803d;text-transform:uppercase;letter-spacing:1px;">Your locked-in price</p>
+      <p style="margin:0;font-size:32px;font-weight:700;color:#1B2A4A;line-height:1.2;">$10,000</p>
+      <p style="margin:6px 0 0 0;font-size:13px;color:#475569;">Professional package &middot; <span style="text-decoration:line-through;color:#94a3b8;">$12,500</span> starting Jan&nbsp;1</p>
+      <p style="margin:10px 0 0 0;font-size:13px;color:#15803d;font-weight:600;">Honored through December 31, 2026</p>
+    </td></tr>
+  </table>
+</td></tr>
+
+<tr><td style="padding:16px 28px 4px 28px;">
+  <p style="margin:0;font-size:14px;color:#475569;line-height:1.7;">To keep this price, sign your proposal before the end of the year. If you're not ready to pay yet, choose <strong style="color:#1B2A4A;">Sign Now, Pay Later</strong>: a $100 deposit locks in the price and a requested training week, and the balance is due two weeks after signing.</p>
+</td></tr>
+
+<!-- CTA -->
+<tr><td style="padding:24px 28px 12px 28px;text-align:center;">
+  <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+    <tr><td style="background:#00bd70;border-radius:8px;padding:16px 48px;text-align:center;">
+      <a href="${proposalUrl}" style="color:#ffffff;font-size:17px;font-weight:700;text-decoration:none;display:block;">View Your Proposal</a>
+    </td></tr>
+  </table>
+</td></tr>
+
+<!-- Closing -->
+<tr><td style="padding:16px 28px 24px 28px;">
+  <p style="margin:0 0 12px 0;font-size:14px;color:#475569;line-height:1.6;">If you have questions, or you'd like to talk through which package fits your team, just reply to this email.</p>
+  <p style="margin:0;font-size:14px;color:#1B2A4A;font-weight:600;">Adam Capps</p>
+  <p style="margin:0;font-size:13px;color:#64748b;">Founder, Roof MRI &amp; ReDry</p>
+  <p style="margin:0;font-size:13px;color:#64748b;">adam@re-dry.com</p>
+</td></tr>
+
+<!-- Footer -->
+<tr><td style="background:#1B2A4A;padding:16px 28px;text-align:center;">
+  <p style="margin:0 0 4px 0;font-size:12px;color:#94a3b8;">Roof MRI | Advancing the Science of Roof Moisture Detection</p>
+  <p style="margin:0;font-size:11px;color:#64748b;">roof-mri.com</p>
+</td></tr>
+
+</table>
+</td></tr></table>
+</body></html>`;
+}
+
+const PRICING_NOTICE_SUBJECT = 'Your $10,000 Roof MRI training price is locked through Dec 31';
 
 // ── Generate proposal PDF (tier comparison) ─────────────────────
 function buildProposalPdf(data, proposalUrl) {
@@ -1586,6 +1700,105 @@ app.post('/api/send-proposal', requireAdmin, async (req, res) => {
   }
 });
 
+// ── Pricing-change notice (admin) ─────────────────────────────────
+// Recipients: one per client email, using their newest price-locked
+// proposal that is unsigned, unpaid, Professional or client-choice, and
+// hasn't been sent the notice yet.
+async function pricingNoticeRecipients() {
+  const { rows } = await pool.query(`
+    SELECT DISTINCT ON (lower(email)) *
+    FROM proposals
+    WHERE price_honored_until IS NOT NULL
+      AND pricing_notice_sent_at IS NULL
+      AND ${REPRICEABLE_SQL}
+      AND COALESCE(selected_tier, tier, 'professional') = 'professional'
+    ORDER BY lower(email), created_at DESC`);
+  return rows;
+}
+
+function proposalUrlFor(id) {
+  const baseUrl = process.env.PROPOSAL_BASE_URL || 'https://proposals.roof-mri.com';
+  return `${baseUrl}/p/${id}`;
+}
+
+app.get('/api/admin/pricing-notice', requireAdmin, async (req, res) => {
+  try {
+    const recipients = await pricingNoticeRecipients();
+    const { rows: [{ sent }] } = await pool.query(
+      `SELECT COUNT(DISTINCT lower(email))::int AS sent FROM proposals WHERE pricing_notice_sent_at IS NOT NULL`
+    );
+    const sample = recipients[0] || { contact_name: 'Jane Contractor', company: 'Acme Roofing', id: 'example' };
+    res.json({
+      subject: PRICING_NOTICE_SUBJECT,
+      alreadySent: sent,
+      recipients: recipients.map(r => ({
+        id: r.id, company: r.company, contact_name: r.contact_name, email: r.email, created_at: r.created_at,
+      })),
+      previewHtml: buildPricingNoticeEmail(sample, proposalUrlFor(sample.id)),
+    });
+  } catch (err) {
+    console.error('Pricing notice list error:', err);
+    res.status(500).json({ error: 'Failed to load pricing notice recipients' });
+  }
+});
+
+// Send one copy to an admin address (uses the first recipient's details)
+app.post('/api/admin/pricing-notice/test', requireAdmin, async (req, res) => {
+  try {
+    const to = String(req.body?.email || req.adminUser?.email || '').trim();
+    if (!isValidEmail(to)) return res.status(400).json({ error: 'Invalid email address' });
+    const recipients = await pricingNoticeRecipients();
+    const sample = recipients[0] || { contact_name: 'Jane Contractor', company: 'Acme Roofing', id: 'example' };
+    await sgMail.send({
+      to,
+      from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
+      replyTo: { email: 'adam@re-dry.com', name: 'Adam Capps' },
+      subject: `[TEST] ${PRICING_NOTICE_SUBJECT}`,
+      html: buildPricingNoticeEmail(sample, proposalUrlFor(sample.id)),
+    });
+    res.json({ success: true, message: `Test sent to ${to}` });
+  } catch (err) {
+    console.error('Pricing notice test error:', err.response ? err.response.body : err);
+    res.status(500).json({ error: 'Failed to send test email' });
+  }
+});
+
+// The real send. Requires { confirm: 'SEND' }. Each client is marked as
+// notified after their email goes out, so a retry never double-sends.
+app.post('/api/admin/pricing-notice/send', requireAdmin, async (req, res) => {
+  if (req.body?.confirm !== 'SEND') {
+    return res.status(400).json({ error: 'Missing confirmation' });
+  }
+  try {
+    const recipients = await pricingNoticeRecipients();
+    const sent = [];
+    const failed = [];
+    for (const p of recipients) {
+      try {
+        await sgMail.send({
+          to: p.email,
+          from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
+          replyTo: { email: 'adam@re-dry.com', name: 'Adam Capps' },
+          subject: PRICING_NOTICE_SUBJECT,
+          html: buildPricingNoticeEmail(p, proposalUrlFor(p.id)),
+        });
+        await pool.query(
+          `UPDATE proposals SET pricing_notice_sent_at = NOW() WHERE lower(email) = lower($1)`,
+          [p.email]
+        );
+        sent.push(p.email);
+      } catch (err) {
+        console.error(`Pricing notice to ${p.email} failed:`, err.response ? err.response.body : err);
+        failed.push(p.email);
+      }
+    }
+    res.json({ success: failed.length === 0, sent: sent.length, failed });
+  } catch (err) {
+    console.error('Pricing notice send error:', err);
+    res.status(500).json({ error: 'Failed to send pricing notices' });
+  }
+});
+
 // ── POST /api/proposals/:id/resend ────────────────────────────────
 // Re-send an existing proposal email (same link, fresh PDF) – admin only.
 // Optional body.email sends it to a different address instead.
@@ -1643,6 +1856,12 @@ app.post('/api/proposals/:id/resend', requireAdmin, async (req, res) => {
 // Returns proposal data (for the Netlify-hosted proposal page to fetch)
 app.get('/api/proposals/:id', proposalViewLimiter, async (req, res) => {
   try {
+    // Bring unsigned proposals onto current pricing first, so the page never
+    // shows a price-locked $10,000 after the lock has expired
+    await pool.query(
+      `UPDATE proposals SET ${REPRICE_SET_SQL} WHERE id = $1 AND ${REPRICEABLE_SQL}`,
+      [req.params.id]
+    );
     const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ error: 'Proposal not found' });
 
@@ -1702,7 +1921,8 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
     // Atomic update: prevents race condition where two concurrent sign requests
     // both pass a status check before either writes
     const { rows: updated } = await pool.query(
-      `UPDATE proposals SET status = $1, signature_name = $2, signature_data = $3, signed_at = NOW(),
+      `UPDATE proposals SET ${REPRICE_SET_SQL},
+        status = $1, signature_name = $2, signature_data = $3, signed_at = NOW(),
         requested_training_week = $4,
         payment_due_date = CASE WHEN $5 THEN (NOW() + make_interval(days => $6))::date ELSE NULL END
        WHERE id = $7 AND status NOT IN ('signed', 'signed_pay_later')
@@ -1769,7 +1989,10 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
       console.error('Failed to send contract to client:', clientEmailErr);
     }
 
-    // Notify Adam that a proposal was signed (with contract attached)
+    // Notify Adam that a proposal was signed (with contract attached).
+    // Signing already succeeded, so an email failure must not surface as
+    // "Failed to sign" to the client.
+    try {
     await sgMail.send({
       to: 'adam@re-dry.com',
       from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
@@ -1789,6 +2012,9 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
       </div>`,
       attachments: pdfAttachment,
     });
+    } catch (notifyErr) {
+      console.error('Failed to send signed notification to Adam:', notifyErr);
+    }
 
     res.json({ success: true, message: 'Proposal signed' });
   } catch (err) {
@@ -1821,7 +2047,7 @@ app.post('/api/proposals/:id/select-tier', proposalViewLimiter, async (req, res)
     const { rows: updated } = await pool.query(
       `UPDATE proposals SET selected_tier = $1, tier = $1, tier_price = $2, total_price = $2
        WHERE id = $3 RETURNING *`,
-      [tier, FIXED_TIER_PRICES[tier], req.params.id]
+      [tier, tierPricesFor(proposal)[tier], req.params.id]
     );
 
     res.json(updated[0]);
@@ -1858,7 +2084,7 @@ app.post('/api/proposals/:id/configure', proposalViewLimiter, async (req, res) =
         extra_trainees = 0, extra_kits = 0, tracks = '{}',
         videography = false, on_roof_day = false
        WHERE id = $3 RETURNING *`,
-      [tier, FIXED_TIER_PRICES[tier], req.params.id]
+      [tier, tierPricesFor(proposal)[tier], req.params.id]
     );
 
     res.json(updated[0]);

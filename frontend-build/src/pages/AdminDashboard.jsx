@@ -140,6 +140,146 @@ function ProposalForm({ onSent }) {
   )
 }
 
+// ── Pricing-change notice ──────────────────────────────────────────
+function PricingNotice({ adminEmail, onSent }) {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState(null)
+  const [showPreview, setShowPreview] = useState(false)
+  const [showList, setShowList] = useState(false)
+  const [busy, setBusy] = useState(null) // 'test' | 'send'
+  const [message, setMessage] = useState(null)
+
+  const load = useCallback(async () => {
+    setError(null)
+    try {
+      const res = await fetch(`${API}/api/admin/pricing-notice`, { headers: await authHeaders() })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`)
+      setData(body)
+    } catch (err) {
+      setError(err.message)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  async function sendTest() {
+    const to = window.prompt('Send a test copy to:', adminEmail || '')
+    if (!to) return
+    setBusy('test'); setMessage(null)
+    try {
+      const res = await fetch(`${API}/api/admin/pricing-notice/test`, {
+        method: 'POST', headers: await authHeaders(), body: JSON.stringify({ email: to.trim() })
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(body.error || 'Failed to send test')
+      setMessage({ ok: true, text: body.message })
+    } catch (err) {
+      setMessage({ ok: false, text: err.message })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function sendAll() {
+    const n = data.recipients.length
+    if (!window.confirm(`Email the pricing notice to ${n} client${n === 1 ? '' : 's'} now? This can't be undone.`)) return
+    setBusy('send'); setMessage(null)
+    try {
+      const res = await fetch(`${API}/api/admin/pricing-notice/send`, {
+        method: 'POST', headers: await authHeaders(), body: JSON.stringify({ confirm: 'SEND' })
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(body.error || 'Failed to send')
+      setMessage(body.failed?.length
+        ? { ok: false, text: `Sent ${body.sent}. Failed: ${body.failed.join(', ')}. Press send again to retry only the failed ones.` }
+        : { ok: true, text: `Sent to ${body.sent} client${body.sent === 1 ? '' : 's'}.` })
+      await load()
+      if (onSent) onSent()
+    } catch (err) {
+      setMessage({ ok: false, text: err.message })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  if (error) {
+    return (
+      <div className="card">
+        <h3 className="section-title">Pricing Change Notice</h3>
+        <div className="admin-error">Couldn{'’'}t load: {error} <button type="button" className="btn-small" onClick={load}>Retry</button></div>
+      </div>
+    )
+  }
+  if (!data) return null
+  const n = data.recipients.length
+  if (n === 0 && !data.alreadySent) return null
+
+  return (
+    <div className="card">
+      <h3 className="section-title">Pricing Change Notice</h3>
+      <p style={{ fontSize: 14, color: '#475569', lineHeight: 1.6, marginBottom: 12 }}>
+        Tells clients with an unsigned proposal that Professional moves to $12,500 on January 1,
+        and that their $10,000 price is honored through December 31, 2026.
+      </p>
+      <p style={{ fontSize: 14, color: '#1B2A4A', marginBottom: 12 }}>
+        {n > 0
+          ? <><strong>{n}</strong> client{n === 1 ? '' : 's'} will receive it.</>
+          : 'Everyone on the list has been notified.'}
+        {data.alreadySent > 0 && <span style={{ color: '#64748b' }}> Already sent: {data.alreadySent}.</span>}
+      </p>
+
+      <div className="proposal-row-actions" style={{ flexWrap: 'wrap', marginBottom: 12 }}>
+        <button type="button" className="btn-small" onClick={() => setShowPreview(v => !v)}>
+          {showPreview ? 'Hide preview' : 'Preview email'}
+        </button>
+        {n > 0 && (
+          <button type="button" className="btn-small" onClick={() => setShowList(v => !v)}>
+            {showList ? 'Hide recipients' : 'See recipients'}
+          </button>
+        )}
+        <button type="button" className="btn-small" onClick={sendTest} disabled={!!busy}>
+          {busy === 'test' ? 'Sending…' : 'Send test to me'}
+        </button>
+        {n > 0 && (
+          <button type="button" className="btn btn-primary" style={{ padding: '7px 14px', fontSize: 13 }} onClick={sendAll} disabled={!!busy}>
+            {busy === 'send' ? 'Sending…' : `Send to ${n} client${n === 1 ? '' : 's'}`}
+          </button>
+        )}
+      </div>
+
+      {message && (
+        <div className={message.ok ? 'admin-success' : 'admin-error'} style={{ marginBottom: 12 }}>{message.text}</div>
+      )}
+
+      {showList && n > 0 && (
+        <div style={{ border: '1px solid #e2e8f0', borderRadius: 6, marginBottom: 12, maxHeight: 260, overflowY: 'auto' }}>
+          {data.recipients.map(r => (
+            <div key={r.id} style={{ padding: '8px 12px', borderBottom: '1px solid #f1f5f9', fontSize: 13 }}>
+              <strong style={{ color: '#1B2A4A' }}>{r.company}</strong>
+              <span style={{ color: '#64748b' }}> · {r.contact_name} · {r.email}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {showPreview && (
+        <div>
+          <p style={{ fontSize: 13, color: '#64748b', marginBottom: 6 }}>
+            Subject: <strong style={{ color: '#1B2A4A' }}>{data.subject}</strong>
+          </p>
+          <iframe
+            title="Pricing notice preview"
+            srcDoc={data.previewHtml}
+            sandbox=""
+            style={{ width: '100%', height: 900, border: '1px solid #e2e8f0', borderRadius: 6, background: '#f1f5f9' }}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Proposals List ─────────────────────────────────────────────────
 function proposalLink(id) {
   return `${window.location.origin}/p/${id}`
@@ -771,6 +911,7 @@ export default function AdminDashboard() {
       {activeTab === 'proposals' && (
         <>
           <ProposalForm onSent={fetchProposals} />
+          <PricingNotice adminEmail={adminEmail} onSent={fetchProposals} />
           <ProposalsList proposals={proposals} loading={loadingProposals} error={proposalsError} onRetry={fetchProposals} />
         </>
       )}
