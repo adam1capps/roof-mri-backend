@@ -7,6 +7,7 @@ import AdminLogin from './pages/AdminLogin'
 import AdminDashboard from './pages/AdminDashboard'
 import PackagesPage from './pages/PackagesPage'
 import InvoicePage from './pages/InvoicePage'
+import HoldPage from './pages/HoldPage'
 import { CLERK_ENABLED, registerClerk } from './lib/clerkBridge'
 import './index.css'
 
@@ -43,6 +44,7 @@ createRoot(document.getElementById('root')).render(
       <Routes>
         <Route path="/" element={<Navigate to="/admin/login" replace />} />
         <Route path="/p/:id" element={<ProposalPage />} />
+        <Route path="/p/:id/hold" element={<HoldPage />} />
         <Route path="/invoice/:id" element={<InvoicePage />} />
         <Route path="/admin/login" element={<WithClerk><AdminLogin /></WithClerk>} />
         <Route path="/admin" element={<WithClerk><AdminDashboard /></WithClerk>} />

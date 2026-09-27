@@ -357,7 +357,7 @@ function ProposalRow({ p }) {
           <span className={`admin-badge badge-${p.payment_status}`}>{p.payment_status}</span>
           {isPayLater && (
             <span style={{ fontSize: 12, color: p.deposit_paid ? '#00a35f' : '#b45309' }}>
-              {p.deposit_paid ? '$100 deposit paid' : 'Deposit pending'}
+              {p.deposit_paid ? '$1,000 deposit paid' : 'Deposit pending'}
             </span>
           )}
           {p.requested_training_week && (

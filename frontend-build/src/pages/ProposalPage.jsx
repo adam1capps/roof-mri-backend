@@ -4,6 +4,7 @@ import Configurator from '../components/Configurator'
 import ComparisonTable from '../components/ComparisonTable'
 import TermsAccordion from '../components/TermsAccordion'
 import SignaturePad from '../components/SignaturePad'
+import { DEPOSIT_AMOUNT, getTrainingWeeks, trainingWindowEnd, formatWeekLabel, formatDate } from '../lib/training'
 
 const API = import.meta.env.VITE_API_URL || ''
 
@@ -51,31 +52,6 @@ const TIER_DESCS = {
   professional: 'Get certified and start scanning. One focused day for your core team, with optional add-on tracks.',
   regional: 'Certification plus two dedicated tracks. Pick the deep dives that matter most to your operation.',
   enterprise: 'Comprehensive rollout across all tracks and locations. Fully custom, operationally capped at 4 on-site days.',
-}
-
-function getTrainingWeeks() {
-  const weeks = []
-  const today = new Date()
-  const start = new Date(today)
-  start.setDate(start.getDate() + 42) // 6 weeks out
-  // Find the next Monday from start
-  const day = start.getDay()
-  const diff = day === 0 ? 1 : day === 1 ? 0 : 8 - day
-  start.setDate(start.getDate() + diff)
-  for (let i = 0; i < 12; i++) {
-    const d = new Date(start)
-    d.setDate(d.getDate() + i * 7)
-    weeks.push(d.toISOString().split('T')[0])
-  }
-  return weeks
-}
-
-function formatWeekLabel(dateStr) {
-  const d = new Date(dateStr + 'T00:00:00')
-  const end = new Date(d)
-  end.setDate(end.getDate() + 4)
-  const opts = { month: 'short', day: 'numeric' }
-  return `Week of ${d.toLocaleDateString('en-US', opts)} – ${end.toLocaleDateString('en-US', opts)}, ${d.getFullYear()}`
 }
 
 export default function ProposalPage() {
@@ -315,7 +291,7 @@ export default function ProposalPage() {
     enterprise: Number(proposal.enterprise_price) || FIXED_PRICES.enterprise,
   }
   const totalPrice = Number(proposal.total_price) || (selectedTier ? tierPrices[selectedTier] : 0)
-  const balanceAfterDeposit = totalPrice - 100
+  const balanceAfterDeposit = totalPrice - DEPOSIT_AMOUNT
   const proposalDate = proposal.created_at
     ? new Date(proposal.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
     : new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
@@ -480,10 +456,10 @@ export default function ProposalPage() {
                     Sign Now. Pay Later.
                   </div>
                   <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginTop: 2 }}>
-                    ($100 deposit required)
+                    ({fmt(DEPOSIT_AMOUNT)} deposit required)
                   </div>
                   <div style={{ fontSize: '0.82rem', color: '#64748b', marginTop: 6 }}>
-                    Sign today, pay the balance within 2 weeks. Pick a training week 6+ weeks out.
+                    Hold your price and pick a training week through {formatDate(trainingWindowEnd())}. The balance is due 2 weeks before training.
                   </div>
                 </div>
               </div>
@@ -690,10 +666,10 @@ export default function ProposalPage() {
           {!depositPaid && (
             <div>
               <p style={{ color: '#64748b', fontSize: '0.9rem', marginBottom: 16 }}>
-                A $100 deposit is required to confirm your training week request.
+                A {fmt(DEPOSIT_AMOUNT)} deposit holds your price and requested training week. It goes toward your total.
               </p>
               <button className="cta-btn" onClick={handleDeposit} type="button" style={{ fontSize: '1rem' }}>
-                Pay $100 Deposit
+                Pay {fmt(DEPOSIT_AMOUNT)} Deposit
               </button>
               <p style={{ color: '#9ba3b5', fontSize: 12, marginTop: 10 }}>
                 Secure payment powered by Stripe
@@ -717,12 +693,12 @@ export default function ProposalPage() {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00a35f" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="20 6 9 17 4 12" />
                 </svg>
-                <span style={{ color: '#166534', fontSize: '0.85rem', fontWeight: 600 }}>$100 Deposit Paid</span>
+                <span style={{ color: '#166534', fontSize: '0.85rem', fontWeight: 600 }}>{fmt(DEPOSIT_AMOUNT)} Deposit Paid</span>
               </div>
               {proposal.payment_due_date && (
                 <p style={{ color: '#64748b', fontSize: '0.85rem', marginBottom: 16 }}>
                   Balance of {fmt(balanceAfterDeposit)} due by{' '}
-                  <strong>{new Date(proposal.payment_due_date).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}</strong>
+                  <strong>{formatDate(proposal.payment_due_date)}</strong>
                 </p>
               )}
               <div style={{ display: 'flex', gap: 12, justifyContent: 'center', flexWrap: 'wrap' }}>

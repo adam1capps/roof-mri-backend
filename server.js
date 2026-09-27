@@ -82,7 +82,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
       return res.json({ received: true });
     }
 
-    // $100 deposit for Sign Now, Pay Later – marks the deposit paid,
+    // Hold-my-price deposit (Sign Now, Pay Later) – marks the deposit paid,
     // NOT the proposal itself
     if (proposalId && session.metadata?.is_deposit === 'true') {
       try {
@@ -100,7 +100,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
             : 'N/A';
           const dueLabel = p.payment_due_date
             ? new Date(p.payment_due_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
-            : 'in 2 weeks';
+            : 'before training';
           await sgMail.send({
             to: 'adam@re-dry.com',
             from: { email: 'adam@re-dry.com', name: 'Roof MRI' },
@@ -110,7 +110,7 @@ app.post('/api/stripe-webhook', express.raw({ type: 'application/json' }), async
                 <span style="color:#fff;font-size:16px;font-weight:700">ROOF <span style="color:#00bd70">MRI</span></span>
               </div>
               <div style="padding:20px;background:#fff;border:1px solid #e2e8f0">
-                <p style="font-size:14px;color:#374151"><strong>$${DEPOSIT_AMOUNT} deposit received</strong> from ${safeName} at ${safeCompany}</p>
+                <p style="font-size:14px;color:#374151"><strong>$${DEPOSIT_AMOUNT.toLocaleString()} deposit received</strong> from ${safeName} at ${safeCompany}</p>
                 <p style="font-size:13px;color:#64748b">Requested training week: ${weekLabel} (request only, not confirmed)</p>
                 <p style="font-size:13px;color:#64748b">Balance ${p.total_price ? 'of $' + (Number(p.total_price) - DEPOSIT_AMOUNT).toLocaleString() : ''} due ${dueLabel}</p>
               </div>
@@ -466,7 +466,7 @@ async function initDB() {
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status)`);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_proposals_payment_status ON proposals(payment_status)`);
 
-  // Pay-later flow: requested training week, $100 deposit, balance due date
+  // Pay-later flow: requested training week, deposit, balance due date
   await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS requested_training_week DATE`);
   await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS payment_due_date DATE`);
   await pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS payment_method TEXT`);
@@ -544,9 +544,27 @@ function tierPricesFor(proposal) {
 }
 
 // Pay-later flow constants
-const DEPOSIT_AMOUNT = 100;            // $100 deposit for "Sign Now, Pay Later"
-const PAY_LATER_DUE_DAYS = 14;         // balance due 2 weeks after signing
-const MIN_TRAINING_LEAD_DAYS = 42;     // requested week must be 6+ weeks out
+const DEPOSIT_AMOUNT = 1000;           // $1,000 deposit to hold a price ("Sign Now, Pay Later")
+const MIN_TRAINING_LEAD_DAYS = 14;     // requested week must start 2+ weeks out
+const TRAINING_WINDOW_END = '2027-03-31'; // hold-your-price training must happen by this date
+const BALANCE_DUE_BEFORE_DAYS = 14;    // balance due 2 weeks before the training week...
+const BALANCE_DUE_MIN_DAYS = 7;        // ...but never sooner than 1 week after signing
+
+// Latest date a pay-later training week may start: the fixed hold window,
+// or six months out once that window has passed.
+function trainingWindowEnd() {
+  const sixMonths = new Date();
+  sixMonths.setUTCMonth(sixMonths.getUTCMonth() + 6);
+  const rolling = sixMonths.toISOString().slice(0, 10);
+  return rolling > TRAINING_WINDOW_END ? rolling : TRAINING_WINDOW_END;
+}
+
+// YYYY-MM-DD offset from a YYYY-MM-DD date (or from today when null)
+function addDays(dateStr, days) {
+  const d = dateStr ? new Date(dateStr + 'T00:00:00Z') : new Date();
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
 
 // ── Build branded HTML email ───────────────────────────────────────
 function buildEmail(data, proposalUrl) {
@@ -808,7 +826,7 @@ function buildPricingNoticeEmail(p, proposalUrl) {
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
 <body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif;">
-<div style="display:none;max-height:0;overflow:hidden;">Your $10,000 price is locked in through December 31. Pricing moves to $12,500 on January 1.</div>
+<div style="display:none;max-height:0;overflow:hidden;">Hold your $10,000 price with a $1,000 deposit and train any time before March 31, 2027.</div>
 <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f1f5f9;">
 <tr><td align="center" style="padding:24px 12px;">
 <table width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);">
@@ -842,15 +860,25 @@ function buildPricingNoticeEmail(p, proposalUrl) {
   </table>
 </td></tr>
 
-<tr><td style="padding:16px 28px 4px 28px;">
-  <p style="margin:0;font-size:14px;color:#475569;line-height:1.7;">To keep this price, sign your proposal before the end of the year. If you're not ready to pay yet, choose <strong style="color:#1B2A4A;">Sign Now, Pay Later</strong>: a $100 deposit locks in the price and a requested training week, and the balance is due two weeks after signing.</p>
+<!-- Option 1: hold the price -->
+<tr><td style="padding:24px 28px 4px 28px;">
+  <p style="margin:0 0 6px 0;font-size:13px;font-weight:700;color:#1B2A4A;text-transform:uppercase;letter-spacing:1px;">Not ready to schedule yet?</p>
+  <p style="margin:0;font-size:14px;color:#475569;line-height:1.7;">Hold your $10,000 price with a $1,000 deposit, which goes toward your total. Then schedule your training for any time between now and <strong style="color:#1B2A4A;">March 31, 2027</strong>. That gives your team six months to fit it in.</p>
+</td></tr>
+<tr><td style="padding:18px 28px 8px 28px;text-align:center;">
+  <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
+    <tr><td style="background:#1B2A4A;border-radius:6px;padding:16px 44px;text-align:center;">
+      <a href="${proposalUrl}/hold" style="color:#ffffff;font-size:17px;font-weight:700;text-decoration:none;display:block;">Hold My Training Price</a>
+    </td></tr>
+  </table>
 </td></tr>
 
-<!-- CTA -->
-<tr><td style="padding:24px 28px 12px 28px;text-align:center;">
-  <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
-    <tr><td style="background:#1B2A4A;border-radius:6px;padding:16px 48px;text-align:center;">
-      <a href="${proposalUrl}" style="color:#ffffff;font-size:17px;font-weight:700;text-decoration:none;display:block;">View Your Proposal</a>
+<!-- Option 2: schedule now -->
+<tr><td style="padding:20px 28px 4px 28px;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid #e2e8f0;border-radius:6px;">
+    <tr><td style="padding:16px 20px;text-align:center;">
+      <p style="margin:0 0 4px 0;font-size:14px;color:#1B2A4A;font-weight:700;">Ready to schedule training for this fall or winter?</p>
+      <a href="${proposalUrl}" style="font-size:14px;color:#1B2A4A;font-weight:600;text-decoration:underline;">Do that here &rarr;</a>
     </td></tr>
   </table>
 </td></tr>
@@ -1899,20 +1927,22 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
     const path = paymentPath === 'pay_later' ? 'pay_later' : 'pay_now';
     let trainingWeek = null;
     if (path === 'pay_later') {
-      // Pay-later requires a requested training week at least 6 weeks out.
-      // (It's a request we'll try to accommodate, not a guaranteed booking.)
+      // Pay-later requires a requested training week between 2 weeks out and
+      // the end of the training window. (It's a request we'll try to
+      // accommodate, not a guaranteed booking.)
       if (!requestedTrainingWeek || !/^\d{4}-\d{2}-\d{2}$/.test(requestedTrainingWeek)) {
         return res.status(400).json({ error: 'Please select a requested training week' });
       }
-      const weekDate = new Date(requestedTrainingWeek + 'T00:00:00Z');
-      if (isNaN(weekDate.getTime())) {
+      if (isNaN(new Date(requestedTrainingWeek + 'T00:00:00Z').getTime())) {
         return res.status(400).json({ error: 'Invalid training week date' });
       }
-      const minDate = new Date();
-      minDate.setUTCDate(minDate.getUTCDate() + MIN_TRAINING_LEAD_DAYS);
-      minDate.setUTCHours(0, 0, 0, 0);
-      if (weekDate < minDate) {
-        return res.status(400).json({ error: 'Pay-later training weeks must be at least 6 weeks out. To request an earlier week, please choose Pay Now.' });
+      if (requestedTrainingWeek < addDays(null, MIN_TRAINING_LEAD_DAYS)) {
+        return res.status(400).json({ error: 'Please choose a training week at least 2 weeks out. For something sooner, choose Pay Now.' });
+      }
+      const windowEnd = trainingWindowEnd();
+      if (requestedTrainingWeek > windowEnd) {
+        const label = new Date(windowEnd + 'T00:00:00Z').toLocaleDateString('en-US', { timeZone: 'UTC', month: 'long', day: 'numeric', year: 'numeric' });
+        return res.status(400).json({ error: `Please choose a training week that starts by ${label}.` });
       }
       trainingWeek = requestedTrainingWeek;
     }
@@ -1920,17 +1950,24 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
     const safeSignatureName = escapeHtml(signatureName);
     const newStatus = path === 'pay_later' ? 'signed_pay_later' : 'signed';
 
+    // Balance due two weeks before the requested training week, but at least a week from today
+    let paymentDueDate = null;
+    if (path === 'pay_later') {
+      const beforeTraining = addDays(trainingWeek, -BALANCE_DUE_BEFORE_DAYS);
+      const earliest = addDays(null, BALANCE_DUE_MIN_DAYS);
+      paymentDueDate = beforeTraining > earliest ? beforeTraining : earliest;
+    }
+
     // Atomic update: prevents race condition where two concurrent sign requests
     // both pass a status check before either writes
     const { rows: updated } = await pool.query(
       `UPDATE proposals SET ${REPRICE_SET_SQL},
         status = $1, signature_name = $2, signature_data = $3, signed_at = NOW(),
         requested_training_week = $4,
-        payment_due_date = CASE WHEN $5 THEN (NOW() + make_interval(days => $6))::date ELSE NULL END
-       WHERE id = $7 AND status NOT IN ('signed', 'signed_pay_later')
+        payment_due_date = $5
+       WHERE id = $6 AND status NOT IN ('signed', 'signed_pay_later')
        RETURNING *`,
-      [newStatus, safeSignatureName, signatureData, trainingWeek,
-       path === 'pay_later', PAY_LATER_DUE_DAYS, req.params.id]
+      [newStatus, safeSignatureName, signatureData, trainingWeek, paymentDueDate, req.params.id]
     );
 
     if (updated.length === 0) {
@@ -1977,7 +2014,7 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
               <p style="font-size:13px;color:#64748b;margin:0">Total: <strong style="color:#1B2A4A">${p.total_price ? '$' + Number(p.total_price).toLocaleString() : 'TBD'}</strong></p>
             </div>
             <p style="font-size:14px;color:#374151;line-height:1.6;margin-bottom:12px">${path === 'pay_later'
-              ? `Next step: pay your $${DEPOSIT_AMOUNT} deposit from your proposal page to confirm your requested training week. The remaining balance is due by ${p.payment_due_date ? new Date(p.payment_due_date).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) : 'two weeks from today'}.`
+              ? `Next step: pay your $${DEPOSIT_AMOUNT.toLocaleString()} deposit from your proposal page to hold your price and requested training week. The remaining balance is due by ${p.payment_due_date ? new Date(p.payment_due_date).toLocaleDateString('en-US', { timeZone: 'UTC', year: 'numeric', month: 'long', day: 'numeric' }) : 'two weeks before your training'}.`
               : 'Next step: complete your payment to lock in your training dates. You can pay directly from your proposal page.'}</p>
             <p style="font-size:14px;color:#374151;line-height:1.6">Questions? Reply to this email or reach out to adam@re-dry.com.</p>
           </div>
@@ -2008,7 +2045,7 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
           <p style="font-size:13px;color:#64748b">${p.tier ? p.tier.charAt(0).toUpperCase() + p.tier.slice(1) : 'Client Choice'} | ${p.total_price ? '$' + Number(p.total_price).toLocaleString() : 'TBD'}</p>
           <p style="font-size:13px;color:#64748b">Signed by: ${safeSignatureName}</p>
           ${path === 'pay_later' ? `
-          <p style="font-size:13px;color:#b45309;font-weight:600">Sign Now, Pay Later &mdash; $${DEPOSIT_AMOUNT} deposit pending, balance due ${p.payment_due_date ? new Date(p.payment_due_date).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : 'in 2 weeks'}</p>
+          <p style="font-size:13px;color:#b45309;font-weight:600">Hold My Price &mdash; $${DEPOSIT_AMOUNT.toLocaleString()} deposit pending, balance due ${p.payment_due_date ? new Date(p.payment_due_date).toLocaleDateString('en-US', { timeZone: 'UTC', month: 'long', day: 'numeric', year: 'numeric' }) : 'before training'}</p>
           <p style="font-size:13px;color:#64748b">Requested training week: ${p.requested_training_week ? new Date(p.requested_training_week).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : 'N/A'} (request only, not confirmed)</p>` : ''}
         </div>
       </div>`,
@@ -2125,7 +2162,7 @@ app.post('/api/proposals/:id/checkout', checkoutLimiter, async (req, res) => {
       return res.status(400).json({ error: 'No price set for this proposal' });
     }
 
-    // If the $100 deposit was already paid, only charge the remaining balance
+    // If the deposit was already paid, only charge the remaining balance
     const amountDue = Number(proposal.total_price) - (proposal.deposit_paid ? DEPOSIT_AMOUNT : 0);
     if (amountDue <= 0) {
       await pool.query(`UPDATE proposals SET payment_status = 'unpaid' WHERE id = $1`, [req.params.id]);
@@ -2153,7 +2190,7 @@ app.post('/api/proposals/:id/checkout', checkoutLimiter, async (req, res) => {
           currency: 'usd',
           product_data: {
             name: `Roof MRI Training \u2013 ${proposal.tier ? proposal.tier.charAt(0).toUpperCase() + proposal.tier.slice(1) : 'Custom'} Package`,
-            description: `Training proposal for ${proposal.company}${proposal.deposit_paid ? ` (balance after $${DEPOSIT_AMOUNT} deposit)` : ''}`,
+            description: `Training proposal for ${proposal.company}${proposal.deposit_paid ? ` (balance after $${DEPOSIT_AMOUNT.toLocaleString()} deposit)` : ''}`,
           },
           unit_amount: Math.round(amountDue * 100), // Stripe uses cents
         },
@@ -2186,7 +2223,7 @@ app.post('/api/proposals/:id/checkout', checkoutLimiter, async (req, res) => {
 });
 
 // ── POST /api/proposals/:id/deposit ───────────────────────────────
-// $100 deposit checkout for "Sign Now, Pay Later" proposals
+// Deposit checkout for "Sign Now, Pay Later" (hold-my-price) proposals
 app.post('/api/proposals/:id/deposit', checkoutLimiter, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM proposals WHERE id = $1', [req.params.id]);
@@ -2203,6 +2240,7 @@ app.post('/api/proposals/:id/deposit', checkoutLimiter, async (req, res) => {
       return res.status(409).json({ error: 'This proposal has already been paid in full' });
     }
 
+    const returnPath = req.body?.returnTo === 'hold' ? '/hold' : '';
     const baseUrl = process.env.PROPOSAL_BASE_URL || 'https://proposals.roof-mri.com';
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
@@ -2211,7 +2249,7 @@ app.post('/api/proposals/:id/deposit', checkoutLimiter, async (req, res) => {
           currency: 'usd',
           product_data: {
             name: 'Roof MRI Training – Deposit',
-            description: `$${DEPOSIT_AMOUNT} deposit to confirm requested training week for ${proposal.company}`,
+            description: `$${DEPOSIT_AMOUNT.toLocaleString()} deposit to hold training price for ${proposal.company} (applied to your total)`,
           },
           unit_amount: DEPOSIT_AMOUNT * 100,
         },
@@ -2220,8 +2258,8 @@ app.post('/api/proposals/:id/deposit', checkoutLimiter, async (req, res) => {
       mode: 'payment',
       customer_email: proposal.email,
       metadata: { proposal_id: proposal.id, is_deposit: 'true' },
-      success_url: `${baseUrl}/p/${proposal.id}?deposit=success`,
-      cancel_url: `${baseUrl}/p/${proposal.id}?deposit=cancelled`,
+      success_url: `${baseUrl}/p/${proposal.id}${returnPath}?deposit=success`,
+      cancel_url: `${baseUrl}/p/${proposal.id}${returnPath}?deposit=cancelled`,
     });
 
     await pool.query(
