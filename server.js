@@ -826,7 +826,7 @@ function buildPricingNoticeEmail(p, proposalUrl) {
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
 <body style="margin:0;padding:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif;">
-<div style="display:none;max-height:0;overflow:hidden;">Hold your $10,000 price with a $1,000 deposit and train any time before March 31, 2027.</div>
+<div style="display:none;max-height:0;overflow:hidden;">Hold your $10,000 price with a $1,000 non-refundable deposit and train any time before March 31, 2027.</div>
 <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f1f5f9;">
 <tr><td align="center" style="padding:24px 12px;">
 <table width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.06);">
@@ -863,7 +863,7 @@ function buildPricingNoticeEmail(p, proposalUrl) {
 <!-- Option 1: hold the price -->
 <tr><td style="padding:24px 28px 4px 28px;">
   <p style="margin:0 0 6px 0;font-size:13px;font-weight:700;color:#1B2A4A;text-transform:uppercase;letter-spacing:1px;">Not ready to schedule yet?</p>
-  <p style="margin:0;font-size:14px;color:#475569;line-height:1.7;">Hold your $10,000 price with a $1,000 deposit, which goes toward your total. Then schedule your training for any time between now and <strong style="color:#1B2A4A;">March 31, 2027</strong>. That gives your team six months to fit it in.</p>
+  <p style="margin:0;font-size:14px;color:#475569;line-height:1.7;">Hold your $10,000 price with a $1,000 non-refundable deposit, which goes toward your total. Then schedule your training for any time between now and <strong style="color:#1B2A4A;">March 31, 2027</strong>. That gives your team six months to fit it in.</p>
 </td></tr>
 <tr><td style="padding:18px 28px 8px 28px;text-align:center;">
   <table cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;">
@@ -2014,7 +2014,7 @@ app.post('/api/proposals/:id/sign', signLimiter, async (req, res) => {
               <p style="font-size:13px;color:#64748b;margin:0">Total: <strong style="color:#1B2A4A">${p.total_price ? '$' + Number(p.total_price).toLocaleString() : 'TBD'}</strong></p>
             </div>
             <p style="font-size:14px;color:#374151;line-height:1.6;margin-bottom:12px">${path === 'pay_later'
-              ? `Next step: pay your $${DEPOSIT_AMOUNT.toLocaleString()} deposit from your proposal page to hold your price and requested training week. The remaining balance is due by ${p.payment_due_date ? new Date(p.payment_due_date).toLocaleDateString('en-US', { timeZone: 'UTC', year: 'numeric', month: 'long', day: 'numeric' }) : 'two weeks before your training'}.`
+              ? `Next step: pay your $${DEPOSIT_AMOUNT.toLocaleString()} non-refundable deposit from your proposal page to hold your price and requested training week. The remaining balance is due by ${p.payment_due_date ? new Date(p.payment_due_date).toLocaleDateString('en-US', { timeZone: 'UTC', year: 'numeric', month: 'long', day: 'numeric' }) : 'two weeks before your training'}.`
               : 'Next step: complete your payment to lock in your training dates. You can pay directly from your proposal page.'}</p>
             <p style="font-size:14px;color:#374151;line-height:1.6">Questions? Reply to this email or reach out to adam@re-dry.com.</p>
           </div>
@@ -2249,7 +2249,7 @@ app.post('/api/proposals/:id/deposit', checkoutLimiter, async (req, res) => {
           currency: 'usd',
           product_data: {
             name: 'Roof MRI Training – Deposit',
-            description: `$${DEPOSIT_AMOUNT.toLocaleString()} deposit to hold training price for ${proposal.company} (applied to your total)`,
+            description: `$${DEPOSIT_AMOUNT.toLocaleString()} non-refundable deposit to hold training price for ${proposal.company} (applied to your total)`,
           },
           unit_amount: DEPOSIT_AMOUNT * 100,
         },

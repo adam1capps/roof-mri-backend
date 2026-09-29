@@ -229,7 +229,7 @@ export default function HoldPage() {
         <div className="card" style={{ borderRadius: 10, textAlign: 'center' }}>
           <h2 style={{ color: NAVY, marginBottom: 8 }}>One step left</h2>
           <p style={{ color: '#475569', lineHeight: 1.7, marginBottom: 16 }}>
-            Your agreement is signed. Pay the {fmt(DEPOSIT_AMOUNT)} deposit to hold your {fmt(price)} price.
+            Your agreement is signed. Pay the {fmt(DEPOSIT_AMOUNT)} non-refundable deposit to hold your {fmt(price)} price.
             {depositParam === 'cancelled' && ' (The payment window was closed before it finished.)'}
           </p>
           {error && <p style={{ color: '#dc2626', fontSize: 14, marginBottom: 12 }}>{error}</p>}
@@ -257,7 +257,7 @@ export default function HoldPage() {
             <ol style={{ color: '#475569', lineHeight: 1.8, paddingLeft: 20, margin: 0 }}>
               <li>Pick the week you{'’'}d like to train, any time through <strong style={{ color: NAVY }}>{formatDate(trainingWindowEnd())}</strong>.</li>
               <li>Sign the training agreement below.</li>
-              <li>Pay a <strong style={{ color: NAVY }}>{fmt(DEPOSIT_AMOUNT)} deposit</strong>. It goes toward your {fmt(price)} total.</li>
+              <li>Pay a <strong style={{ color: NAVY }}>{fmt(DEPOSIT_AMOUNT)} non-refundable deposit</strong>. It goes toward your {fmt(price)} total.</li>
               <li>The remaining <strong style={{ color: NAVY }}>{fmt(price - DEPOSIT_AMOUNT)}</strong> is due two weeks before your training week.</li>
             </ol>
           </div>
@@ -289,7 +289,7 @@ export default function HoldPage() {
               <p style={{ textAlign: 'center', color: '#94a3b8', fontSize: 13, marginTop: 12 }}>
                 {redirecting
                   ? 'Opening secure checkout…'
-                  : `After you sign, you'll pay the ${fmt(DEPOSIT_AMOUNT)} deposit on Stripe's secure checkout.`}
+                  : `After you sign, you'll pay the ${fmt(DEPOSIT_AMOUNT)} non-refundable deposit on Stripe's secure checkout.`}
               </p>
             </>
           ) : (

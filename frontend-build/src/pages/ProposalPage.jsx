@@ -456,7 +456,7 @@ export default function ProposalPage() {
                     Sign Now. Pay Later.
                   </div>
                   <div style={{ fontSize: '0.78rem', color: '#94a3b8', marginTop: 2 }}>
-                    ({fmt(DEPOSIT_AMOUNT)} deposit required)
+                    ({fmt(DEPOSIT_AMOUNT)} non-refundable deposit required)
                   </div>
                   <div style={{ fontSize: '0.82rem', color: '#64748b', marginTop: 6 }}>
                     Hold your price and pick a training week through {formatDate(trainingWindowEnd())}. The balance is due 2 weeks before training.
@@ -666,7 +666,7 @@ export default function ProposalPage() {
           {!depositPaid && (
             <div>
               <p style={{ color: '#64748b', fontSize: '0.9rem', marginBottom: 16 }}>
-                A {fmt(DEPOSIT_AMOUNT)} deposit holds your price and requested training week. It goes toward your total.
+                A {fmt(DEPOSIT_AMOUNT)} non-refundable deposit holds your price and requested training week. It goes toward your total.
               </p>
               <button className="cta-btn" onClick={handleDeposit} type="button" style={{ fontSize: '1rem' }}>
                 Pay {fmt(DEPOSIT_AMOUNT)} Deposit
